@@ -913,8 +913,8 @@ feed reads that read from the initial state\\
 \textrel{PPC} & \textrel{SYNC}, \textrel{LWSYNC}, \textrel{EIEIO}, \textrel{ISYNC}\\
 \textrel{ARM} &  \textrel{DMB}, \textrel{DMB.ST}, \textrel{DSB}, \textrel{DSB.ST}, \textrel{ISB}\\
  \textrel{MIPS} & \textrel{SYNC}\\
-\textrel{AArch64} &  \textrel{DMB.SY},  \textrel{DMB.ST}, \textrel{DMB.ST}, \ldots
-\textrel{DSB.SY},  \textrel{DSB.ST}, \textrel{DSB.ST}, \ldots\\
+\textrel{AArch64} &  \textrel{DMB.SY},  \textrel{DMB.LD}, \textrel{DMB.ST}, \ldots
+\textrel{DSB.SY},  \textrel{DSB.LD}, \textrel{DSB.ST}, \ldots\\
 \end{desctable}
 \end{figure}
 Specific fence event sets depends on the test architecture,
