@@ -102,7 +102,7 @@ let opts =
    "-v",Arg.Unit (fun () -> incr verbose), " be verbose";
    "-o",
    Arg.String (fun name -> outname := Some name),
-   "<name> overide default filename"
+   "<name> override default filename"
   ]
 
 let () =
