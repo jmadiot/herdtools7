@@ -1,5 +1,7 @@
 "C++11, generate lock-order"
 
+include "c11_cos.cat"
+
 (* Direct generation, replaced by optimised generation *)
 
 (* with lo from generate_orders(LS|UL,po) *)

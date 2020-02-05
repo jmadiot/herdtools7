@@ -1,4 +1,9 @@
 LL
+
+let RW(r) = r & (R * W)
+let WR(r) = r & (W * R)
+let WW(r) = r & (W * W)
+
 let chapo = fr | rf | co | (co;rf) | (fr;rf)
 let poi = WW(po-loc) | RW(po-loc) | WR(po-loc)
 irreflexive poi ; chapo

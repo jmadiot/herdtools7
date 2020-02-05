@@ -5,6 +5,11 @@
 (**********************)
 
 let invrf=rf^-1
+let noid(r) = r \ id
+let RR(r) = r & (R * R)
+let RW(r) = r & (R * W)
+let WR(r) = r & (W * R)
+let WW(r) = r & (W * W)
 
 (* co observations in test *)
 let obsco =
