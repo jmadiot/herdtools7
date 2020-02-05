@@ -1,4 +1,4 @@
-"Generate co's igoring load-load hazards"
+"Generate co's ignoring load-load hazards"
 
 (* generates possible co's *)
 

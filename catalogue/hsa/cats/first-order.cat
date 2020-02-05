@@ -33,7 +33,7 @@ empty rmwid & (coh;coh) as AtomCons
 (* gdo aka no value out of thin-air *)
 let ldo = addr | data | ctrl
 //let gdo = (coh | ldo)+
-let gdo = (rfe | ldo)+ // Definitely a shortcomming of initial model
+let gdo = (rfe | ldo)+ // Definitely a shortcoming of initial model
 irreflexive gdo as GdoCons
 
 (* happens before *)
