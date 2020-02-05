@@ -1,12 +1,4 @@
-(** Usage:
- cat2coq7 sc.cat > sc.v
- *)
-
 open Printf
-
-let a : int -> unit =
-  let n = ref 0 in
-  function _ -> if !n = 0 then failwith "" else decr n
 
 (** Coq-encodable expressions + try/with *)
 
@@ -20,18 +12,17 @@ let pprint_op1 : AST.op1 -> string -> string =
   | Star -> sprintf "%s^*"
   | Opt -> sprintf "%s?"
 
-type t = AST.op2
-
-type op2 = Union | Cons | Seq | Inter | Sub | Cartes | Cast
+type op2 = Union | Cons | Seq | Inter | Sub | Cartes | Cast | And
 
 let pprint_op2 = function
-  | Union -> "|"
+  | Union -> "∪"
   | Cons -> "++"
-  | Seq -> ";"
+  | Seq -> ";;"
   | Inter -> "&"
   | Sub -> "\\"
   | Cartes -> "*"
   | Cast -> ":"
+  | And -> "/\\"
 
 type exp =
   | Var_ of string
@@ -109,8 +100,7 @@ let rec used_vars : exp -> StringSet.t =
 
 let name_like (x : string) : int -> string = function
   | 0 -> x
-  | 1 -> x ^ "_"
-  | n -> x ^ "_" ^ string_of_int (n - 2)
+  | n -> x ^ "_" ^ string_of_int (n - 1)
 
 let first (f : int -> 'a) (filter : 'a -> bool) =
   let rec aux n = if filter (f n) then f n else aux (n + 1) in
@@ -183,9 +173,10 @@ let level_op2 = function
   | Sub -> 45
   | Cartes -> 40
   | Cast -> 2
+  | And -> 80
 
 let right_associative = function
-  | Union | Cons | Seq | Inter -> true
+  | Union | Cons | Seq | Inter | And -> true
   | Sub | Cartes | Cast -> false
 
 let rec cascade_op (o : op2) : exp -> exp list =
@@ -240,7 +231,7 @@ let print_exp = pprint_exp_scope
 (** Instructions, parameterized by a type for possibly-generated names *)
 
 type 'name instr =
-  | Def of 'name * string option * exp
+  | Def of 'name * string option (* possible type annotation*) * exp * bool (* is a test *)
   | Axiom of 'name * exp
   | Inductive of (string * 'name * exp) list
   | Withfrom of string * 'name * exp
@@ -256,7 +247,7 @@ let free_vars_of_instr (fv: 'a -> string list) : 'a instr -> StringSet.t =
   let (+) xs set = List.fold_right add xs set in
   (* let (+) s = function Normal x -> add x s | Fresh _ -> s in *)
   function
-  | Def (x, _, e) -> fv x + free_vars e
+  | Def (x, _, e, _) -> fv x + free_vars e
   | Axiom (x, e) -> fv x + free_vars e
   | Inductive defs ->
      unions (List.map (fun (x, y, e) -> [x] + (fv y + free_vars e)) defs)
@@ -267,31 +258,71 @@ let free_vars_of_instrs (fv: 'a -> string list) (l : 'a instr list) =
   StringSet.unions (List.map (free_vars_of_instr fv) l)
 
 
-(** Type annotations for cases for which Cst fails at inference. This
-   is less useful since currying has become the norm *)
-
-let force_type : string -> string option =
-  function
-  | "toid" -> Some "rln events"
-  | _ -> None
-
-
-(** Defs that are too complex to translate, so we remove them
+(** Definitions that are too complex to translate, so we remove them
    and define them in the prelude *)
 
 let remove_defs = 
   ["co_locs"; "cross"; "map"]
 
 
-(** Defs that are in the prelude but can be shadowed *)
+(** Definitions that are given as aguments to the model *)
+
+let sets_from_execution =
+  ["R"; "W"; "IW"; "FW"; "B"; "RMW"; "F"]
+
+let relations_from_execution =
+  ["rf"; "po"; "co"; "int"; "ext"; "loc"; "addr"; "data"; "ctrl"]
+
+let imports_from_execution =
+  List.map
+    (fun x -> Def (x, None, App_ (Cst x, Cst "exec"), false))
+    (sets_from_execution
+     @ relations_from_execution
+     @ ["unknown_set"; "unknown_relation"]
+    )
+
+let axioms =
+  List.map
+    (fun x -> Axiom (x, App_ (Cst "set", Cst "events")))
+    sets_from_execution
+  @
+    List.map
+      (fun x -> Axiom (x, App_ (Cst "relation", Cst "events")))
+      relations_from_execution
+
+let start_text = "\
+Section Model.
+
+Variable exec : execution.
+Definition events := events exec.
+
+(* Makes possible to default to events when A cannot be inferred *)
+Instance SetLike_set_events : SetLike (set events) := SetLike_set events.
+Instance SetLike_relation_events : SetLike (relation events) := SetLike_relation events.
+"
+
+let middle_definitions = "\
+Definition M := union R W.
+Definition emptyset : set events := empty.
+Definition classes_loc (S : set events) : set (set events) :=
+  fun Si => forall x y, Si x -> Si y -> loc x y.
+"
+
+let end_text = "End Model.\n"
+
+
+(** Definitions that are in the prelude but can be shadowed *)
+
 let shadowable =
-  [ "empty_pred"; "universal"; "complement"; "union"; "intersection";
-    "diff"; "rln_comp"; "rln_mirror"; "cartesian"; "incl"; "id";
-    "to_id"; "domain"; "range"; "diagonal"; "acyclic"; "is_empty";
-    "irreflexive"; "clos_trans"; "clos_refl_trans"; "clos_refl";
-    "empty"; "set"; "rln"; "not"; "total_order"; "linearisations";
-    "set_flatten"; "set_map"; "loc"; "classes-loc"; "_";  "emptyset";
-    "W"; "R"; "M"; "IW"; "FW"; "B"; "RMW"; "F"; "empty"; "sig" ]
+  sets_from_execution @
+    relations_from_execution @
+      [ "empty_pred"; "universal"; "complement"; "union"; "intersection";
+        "diff"; "rel_seq"; "rel_inv"; "cartesian"; "incl"; "id";
+        "to_id"; "domain"; "range"; "diagonal"; "acyclic"; "is_empty";
+        "irreflexive"; "clos_trans"; "clos_refl_trans"; "clos_refl";
+        "set"; "relation"; "not"; "total_order"; "linearisations";
+        "set_flatten"; "set_map"; "classes-loc"; "_";  "emptyset";
+        "empty"; "sig"; "M" ]
 
 let in_prelude = remove_defs @ shadowable
 
@@ -316,7 +347,8 @@ let fence_sets =
   fence_sets
   (* We can detect the architecture or say it Sys.argv instead of just
      adding everything like as below *)
-  |> List.map snd |> List.concat
+  |> List.map snd
+  |> List.concat
   |> List.sort compare
   |> let rec uniq = function
        | [] -> []
@@ -325,46 +357,69 @@ let fence_sets =
        | a :: b :: l -> a :: uniq (b :: l)
      in uniq
 
+let unknown_sets =
+  ["L"; "A"; "X"; "I"; "UL"; "E"; "LS"; "LK"; "CON"; "Q"; "T";
+   "NoRet"; "fence";
+   "Sc"; "SC";
+   "ACQ_REL"; "ACQ"; "REL"; "RLX";
+   "AcqRel"; "Acq"; "Rel";
+   "Fence.r.r" ; "Fence.r.w" ; "Fence.r.rw" ;
+   "Fence.w.r" ; "Fence.w.w" ; "Fence.w.rw" ;
+   "Fence.rw.r"; "Fence.rw.w"; "Fence.rw.rw";
+   "Fence.tso" ]
+
+let unknown_relations =
+  ["amo"; "dmb.st"; "dsb.st"; "tag2events";
+   "fr";
+   "rmw"; "coi"; "sm";
+   "coe"; "fre"; "ppo" ;
+   "strong"; "light";
+   "cc0"; "ci0"; "ic0"; "ii0"; (* for ppo.cat *)
+   "iico_ctrl"; "iico_data" ]
+
+let is_rel x = List.mem x unknown_relations
+
+let unknown_def x =
+  if is_rel x
+  then Def (x, None, App_ (Cst "unknown_relation", Cst (sprintf "\"%s\"" x)), false)
+  else Def (x, None, App_ (Cst "unknown_set", Cst (sprintf "\"%s\"" x)), false)
+
+let unknown_axiom x =
+  if is_rel x
+  then Axiom (x, App_ (Cst "relation", Cst "events"))
+  else Axiom (x, App_ (Cst "set", Cst "events"))
+
 let on_demand =
   let oftype ty = List.map (fun id -> (id, ty)) in
   oftype "set events" fence_sets
-  @ oftype "set events" [
-        "L"; "A"; "X"; "I"; "UL"; "F"; "E"; "LS"; "LK"; "CON"; "Q"; "T";
-        "NoRet"; "fence"; "tag2events"; "RMW";
-        "Sc"; "SC";
-        "ACQ_REL"; "ACQ"; "REL"; "RLX";
-        "AcqRel"; "Acq"; "Rel";
-        "Fence.r.r" ; "Fence.r.w" ; "Fence.r.rw" ;
-        "Fence.w.r" ; "Fence.w.w" ; "Fence.w.rw" ;
-        "Fence.rw.r"; "Fence.rw.w"; "Fence.rw.rw";
-        "Fence.tso";
-      ]
-  @ oftype "rln events"
-      ["addr"; "amo"; "dmb.st"; "dsb.st";
-       "ctrl"; "data"; "po"; "rf"; "fr";
-       "rmw"; "co"; "coi"; "sm"; "int"; "ext";
-       "coe"; "fre"; "ppo" ;
-       "strong"; "light";
-       "cc0"; "ci0"; "ic0"; "ii0"; (* for ppo.cat *)
-       "iico_ctrl"; "iico_data";
-      ]
-  @ oftype "rln events -> rln events" ["noid"; "RR"; "RW"; "WR"; "WW"]
-  @ [("generate_orders", "set events -> rln events -> set (rln events)")]
+  @ oftype "set events" unknown_sets
+  @ oftype "relation events" unknown_relations
+
+
 
 let duplicates (l : 'a list) : 'a list =
   List.filter (fun x -> 1 <> List.length (List.find_all ((=) x) l)) l
 
-let () =
-  let f l = let d = duplicates l in if d <> [] then failwith (String.concat ", " d) in
-  f (List.map fst on_demand)
+let check_no_duplicates : unit =
+  List.map fst on_demand @ shadowable
+  |> duplicates
+  |> function
+    | [] -> ()
+    | d -> failwith ("internal error; duplications: " ^ String.concat ", " d)
+
+
+(** Type annotations for cases for which Cst fails at inference. This
+   is less useful since currying has become the norm *)
+
+let force_type : string -> string option =
+  function
+  | "toid" -> Some "relation events"
+  | _ -> None
 
 let special_cases =
   List.map @@
     function
-    (* Next line only for co.v TODO ask Luc *)
-    | Def (x, _, App_ ((Var_ ("int" | "ext") as a), (Var_ ("co" | "fr") as b))) ->
-       Def (x, None, App_ (App_ (Cst "intersection", a), b))
-    | Def (x, _, e) -> Def (x, force_type x, e)
+    | Def (x, _, e, t) -> Def (x, force_type x, e, t)
     | instr -> instr
 
 
@@ -382,16 +437,16 @@ let pprint_instr (i : string instr) : string list =
      [indent ^
        match i with
        | Comment s -> sprintf "(* %s *)" s
-       | Def (x, ty, Fun_ (xs, e)) ->
+       | Def (x, ty, Fun_ (xs, e), _) ->
           sprintf "Definition %s %s %s:= %s."
             x (String.concat " " xs) (opt ty) (pprint_exp e)
-       | Def (x, ty, e) -> sprintf "Definition %s %s:= %s." x (opt ty) (pprint_exp e)
-       | Axiom (x, e) -> sprintf "Axiom %s : %s." x (pprint_exp e)
+       | Def (x, ty, e, _) -> sprintf "Definition %s %s:= %s." x (opt ty) (pprint_exp e)
+       | Axiom (x, e) -> sprintf "Variable %s : %s." x (pprint_exp e)
        | Inductive defs ->
           let f (x, cx, e) =
-            sprintf "%s : rln _ := %s : incl (%s) %s" x cx (pprint_exp e) x
+            sprintf "%s : relation _ := %s : incl (%s) %s" x cx (pprint_exp e) x
           in sprintf "Inductive %s."
-               (String.concat ("\n" ^ indent ^ "with ")
+               (String.concat ("\n" ^ indent ^ "  with ")
                   (List.map f defs))
        | Withfrom _ ->
           invalid_arg "withfroms should have been eliminated before"
@@ -408,7 +463,7 @@ let exp_of_op1 : AST.op1 -> exp =
   | Star -> app (Cst "clos_refl_trans", Cst "_")
   | Opt -> app (Cst "clos_refl", Cst "_")
   | Comp -> Cst "complement"
-  | Inv -> Cst "rln_mirror"
+  | Inv -> Cst "rel_inv"
   | ToId -> Cst "to_id"
 
 let translate_op1 (o : AST.op1) e = App_ (exp_of_op1 o, e)
@@ -427,7 +482,7 @@ let rec translate_op2 (o : AST.op2) (es : exp list) : exp =
   | AST.Cartesian, [e1; e2] -> app2 "cartesian" e1 e2
   | AST.Add, [e1; e2] -> app2 "add_element" e1 e2
   | AST.Seq, [e] -> e
-  | AST.Seq, (e :: l) -> app2 "rln_comp" e (translate_op2 AST.Seq l)
+  | AST.Seq, (e :: l) -> app2 "rel_seq" e (translate_op2 AST.Seq l)
   | AST.Tuple, e -> Tup e
   | ((AST.Inter | AST.Diff | AST.Cartesian | AST.Add),
      ([] | [_] | _ :: _ :: _ :: _)) | (AST.Seq, []) ->
@@ -533,14 +588,14 @@ let rec translate_instr k (parse_file : string -> AST.ins list) (i : AST.ins)
      @ List.concat (List.map (translate_instr k parse_file) (parse_file filename))
      @ [Comment "DEDENT"]
      @ [Comment (sprintf "End of import from %s" filename)]
-  | Test ((_, _, test, e, None), _) -> [Def (Fresh "Test", None, of_test test k e)]
-  | Test ((_, _, test, e, Some x), _) -> [Def (Normal x, None, of_test test k e)]
+  | Test ((_, _, test, e, None), _) -> [Def (Fresh "Test", None, of_test test k e, true)]
+  | Test ((_, _, test, e, Some x), _) -> [Def (Normal x, None, of_test test k e, true)]
   | Let (_, [(_, Pvar Some name, _)]) when List.mem name remove_defs ->
      [Comment (sprintf "Definition of %s already included in the prelude" name)]
   | Let (_, bindings) ->
      let f : AST.binding -> _ = function
-       | (_, Pvar None, exp) -> Def (Fresh "_", None, translate_exp k exp)
-       | (_, Pvar Some name, exp) -> Def (Normal name, None, translate_exp k exp)
+       | (_, Pvar None, exp) -> Def (Fresh "_", None, translate_exp k exp, false)
+       | (_, Pvar Some name, exp) -> Def (Normal name, None, translate_exp k exp, false)
        | (_, Ptuple _, _) -> invalid_arg "toplevel let with tuple"
      in List.map f bindings
   | Rec (loc, bds, Some test) ->
@@ -548,7 +603,7 @@ let rec translate_instr k (parse_file : string -> AST.ins list) (i : AST.ins)
        translate_instr k parse_file (Test (test, Check))
   | Rec (_, bindings, None) ->
      let f : AST.binding -> _ = function
-       | (_, Pvar (Some name), exp) -> (name, Fresh (name ^ "cons"), translate_exp k exp)
+       | (_, Pvar (Some name), exp) -> (name, Fresh (name ^ "_c"), translate_exp k exp)
        | (_, Pvar None, _) -> invalid_arg "nameless let rec"
        | (_, Ptuple _, _) -> invalid_arg "tuple in let rec"
      in [Inductive (List.map f bindings)]
@@ -581,7 +636,7 @@ let resolve_fresh (l : name instr list) : string instr list =
   in
   let freshen = function Normal x -> x | Fresh x -> fresh x in
   let resolve : name instr -> string instr = function
-    | Def (x, ty, e) -> Def (freshen x, ty, e)
+    | Def (x, ty, e, t) -> Def (freshen x, ty, e, t)
     | Axiom (x, e) -> Axiom (freshen x, e)
     | Inductive defs ->
        Inductive (List.map (fun (x, n, e) -> (x, freshen n, e)) defs)
@@ -597,7 +652,7 @@ let remove_withfrom (l : string instr list) : string instr list =
   let f : string instr -> string instr list = function
     | Withfrom (x, set, e) ->
        [Axiom (set, App_(Cst "sig", e));
-        Def (x, None, App_(Cst "proj1_sig", Var_ set))]
+        Def (x, None, App_(Cst "proj1_sig", Var_ set), false)]
     | i -> [i]
   in
   List.concat (List.map f l)
@@ -627,7 +682,7 @@ let resolve_shadowing defined (instrs : string instr list) : string instr list =
   in
   let sub e = subst_with_var !renaming e in
   let rename = function
-    | Def (x, ty, e) -> let e = sub e in Def (def x, ty, e)
+    | Def (x, ty, e, t) -> let e = sub e in Def (def x, ty, e, t)
     | Axiom (x, e) -> let e = sub e in Axiom (def x, e)
     | Inductive defs ->
        defs
@@ -693,13 +748,12 @@ let remove_trywith defined : string instr list -> string instr list =
                          else Annot ("failed: "^ s, f e2)
     | Annot (s, e)    -> Annot (s, f e)
   in
-  (* TODO: replace with commandline-arguments and also the "uses" *)
   let defined = ref defined in
   let rmtry e = rmtry !defined e in
   let define x = defined := add x !defined in
   let def x = define x; x in
   List.map (function
-      | Def (x, ty, e) -> let e = rmtry e in Def (def x, ty, e)
+      | Def (x, ty, e, t) -> let e = rmtry e in Def (def x, ty, e, t)
       | Axiom (x, e) -> let e = rmtry e in Axiom (def x, e)
       | Inductive defs ->
          List.iter (fun (x, y, _) -> define x; define y) defs;
@@ -707,6 +761,43 @@ let remove_trywith defined : string instr list -> string instr list =
       | Withfrom (x, y, e)    -> let e = rmtry e in Withfrom (def x, def y, e)
       | Comment s -> Comment s)
 
+
+(** Collect all tests and add them at the end *)
+
+let rec filter_map (f : 'a -> 'b option) : 'a list -> 'b list =
+  function
+  | [] -> []
+  | a :: l ->
+     match f a with
+     | None -> filter_map f l
+     | Some b -> b :: filter_map f l
+
+let rec fold_right1 (f : 'a -> 'a -> 'a) : 'a list -> 'a =
+  function
+  | [] -> invalid_arg "fold_right1"
+  | [x] -> x
+  | x :: xs -> f x (fold_right1 f xs)
+
+let collect_tests instrs : string instr list =
+  (* [Def ("valid", None, Cst "(\* TBD *\)", false)]; *)
+  let instrs =
+    match instrs with
+    | Def ("valid", _, _, _) :: l -> l
+    | _ -> failwith "internal error - first instruction was not added"
+  in
+  let testnames =
+    filter_map
+      (function Def (x, _, _, true) -> Some x | _ -> None)
+      instrs
+  in
+  let alltests =
+    match testnames with
+    | [] -> Annot ("No tests found", Cst "True")
+    | _ -> fold_right1
+             (fun x y -> Op2 (And, x, y))
+             (List.map (fun x -> Var_ x) testnames)
+  in
+  instrs @ [Def ("valid", Some "Prop", alltests, false)]
 
 (** Behaves as [f] but checks injectivity where it is called *)
 
@@ -744,7 +835,7 @@ let resolve_charset : string instr list -> string instr list =
   in
   List.map
     (function
-     | Def (x, ty, e) -> Def (fx x, ty, fe e)
+     | Def (x, ty, e, t) -> Def (fx x, ty, fe e, t)
      | Axiom (x, e) -> Axiom (fx x, fe e)
      | Inductive l ->
         Inductive (List.map (fun (x, y, e) -> (fx x, fx y, fe e)) l)
@@ -774,7 +865,7 @@ let naming_information (instructions : string instr list) : naming =
   let def x = defined += singleton x in
   begin List.iter
     (function
-     | Def (x, _, e) -> use e; def x
+     | Def (x, _, e, _) -> use e; def x
      | Axiom (x, e) -> use e; def x
      | Withfrom (x, y, e) -> use e; def x; def y
      | Comment _ -> ()
@@ -789,6 +880,8 @@ let naming_information (instructions : string instr list) : naming =
 
 
 (** From cat-like instructions to coq-like instructions *)
+
+let use_axioms = false
 
 let transform_instrs (l : name instr list) : string instr list =
   let open StringSet in
@@ -835,12 +928,14 @@ let transform_instrs (l : name instr list) : string instr list =
   in
   (* if ondemand <> [] then fprintf stderr "%s\n%!" warning; *)
   let l = if ondemand = [] then l else Comment warning :: l in
-  let provide x = Axiom (x, Cst (List.assoc x on_demand)) in
+  let provide = if use_axioms then unknown_axiom else unknown_def in
   let ondemand_definitions = List.map provide ondemand in
   
   let defined_before = union uses (union prelude (of_list ondemand))  in
   l
+  |> (@) [Def ("valid", None, Cst "(* TBD *)", false)]
   |> resolve_shadowing defined_before
+  |> collect_tests
   |> remove_trywith defined_before
   |> (@) ondemand_definitions
   |> resolve_charset
@@ -875,65 +970,135 @@ let pprint_coq_model
   let instrs = transform_instrs instrs in
   
   let comment s = pprint_instr (Comment s) in
+  let prelude =
+    if prelude = [] then [] else
+      comment "Import of prelude" @
+        List.map ((^) "  ") prelude @
+          comment "End of prelude"
+  in
+  
+  let print_instrs l = List.concat (List.map (pprint_instr) l) in
+  
+  let intro_R_W_etc =
+    if use_axioms
+    then axioms
+    else imports_from_execution
+  in
   
   [
     comment (sprintf "Translation of model %s" name);
-    comment "Import of prelude";
-    List.map ((^) "  ") prelude;
-    comment "End of prelude";
+    prelude;
+    [start_text];
+    print_instrs intro_R_W_etc;
+    [middle_definitions];
     if keepnotations then ["Open Scope cat_scope."] else [];
-    List.concat (List.map (pprint_instr) instrs);
-    comment (sprintf "End of translation of model %s" name)
+    print_instrs instrs;
+    comment (sprintf "End of translation of model %s" name);
+    [end_text];
   ]
   |> List.concat |> String.concat "\n"
 
 
 (** Read commandline options *)
 
-let args, debug, notations, output_file, includes, usage, convertfilename =
-  let includes = ref [] in
-  let debug = ref false in
-  let notations = ref true in
-  let output_file = ref "-" in
-  let args = ref [] in
-  let convertfilename = ref false in
-  let get_cmd_arg s = args := s :: !args in
-  let prog =
-    if Array.length Sys.argv > 0 then
-      Filename.basename Sys.argv.(0)
-    else "cat2coq7"
-  in
-  let usage = sprintf "Usage: %s [options]* <file.cat>" prog in
-  let options = [
+let includes = ref []
+let debug = ref false
+let prelude = ref true
+let notations = ref true
+let quiet = ref false
+let makefile = ref false
+let output_file = ref None
+let all = ref false
+let cat = ref true
+let args = ref []
+let convertfilename = ref false
+
+let prog =
+  if Array.length Sys.argv > 0 then
+    Filename.basename Sys.argv.(0)
+  else "cat2coq7"
+
+let forbidden_chars = "-.+"
+
+let usage =
+  sprintf
+    "Usage: %s [options]* <file.cat> [<file.cat>]*
+     Translate .cat files into .v files, and create a Cat.v file
+     containing basic definitions, including the one of execution.
+"
+    prog
+
+let () =
+  (fun options ->
+    Arg.parse
+      options
+      (fun s -> args := s :: !args)
+      usage)
+    [
       ("-I",
        Arg.String (fun s -> includes := !includes @ [s]),
-       "<dir> add <dir> to search path");
+       "<dir>  add <dir> to search path")
+    ;
       ("-debug",
        Arg.Unit (fun () -> debug := true),
-       "debug messages, e.g. for parsing");
+       " display which files are opened")
+    ;
+      ("-allcats",
+       Arg.Unit (fun () -> makefile := true; all := true),
+       " add all the cats in herd's libdir's directory to the list of 
+        input files. Also turn on the -makefile option.  Use
+           "^prog^" -allcats && make -j7
+        to check everything.")
+    ;
+      ("-makefile",
+       Arg.Unit (fun () -> makefile := true),
+       " generate a Makefile for all the .v files generated, including
+        Cat.v, and a file importeverything.v that check that all the
+        validity conditions are defined.")
+    ;
+      ("-nocat",
+       Arg.Unit (fun () -> cat := false),
+       " do not write Cat.v")
+    ;
       ("-nonotations",
        Arg.Unit (fun () -> notations := false),
-       "do not keep notations, uses regular identifiers instead") ;
+       " do not keep notations, uses regular identifiers instead")
+    ;
+      ("-noprelude",
+       Arg.Unit (fun () -> prelude := false),
+       " do not include any prelude")
+    ;
       ("-convertfilename",
        Arg.Unit (fun () -> convertfilename := true),
-       "do not read any file, simply convert the filename to a coq-compatible filename (-, ., mapped to _)") ;
-      ("-o", Arg.String
-               (function
-                | "-" -> output_file := "-"
-                | _ -> failwith "not implemented"), (* TODO *)
-       "<filename> generated file name, - for stdtout, default stdout") ;
-    ] in
-  Arg.parse options get_cmd_arg usage;
-  (!args, !debug, !notations, !output_file, !includes, usage, !convertfilename)
+       sprintf
+         " do not read any file, simply display the filename converted
+          to a coq-compatible filename (characters in \"%s\" are mapped
+          to '_'). Note that the filenames are in the current directory,
+          which may differ from the cat file(s) directory."
+         (String.escaped forbidden_chars)
+      )
+    ;
+      ("-q",
+       Arg.Unit (fun () -> quiet := true),
+       " quiet: read and parse files but do not write anything"
+      )
+    ;
+      ("-o",
+       Arg.String (fun s -> output_file := Some s),
+       "<filename>  generated file name, - for standard output. The
+        default is a coq-compatible name generated from the input
+        filename. If this option is provided, only one file can be
+        handled at a time.")
+    ]
 
 let libfind =
   let module ML =
     MyLib.Make
       (struct
-        let includes = includes
+        let includes = !includes
         let env = Some "HERDLIB"
         let libdir = Filename.concat Version.libdir "herd"
-        let debug = debug
+        let debug = !debug
       end) in ML.find
 
 module Parser =
@@ -943,29 +1108,119 @@ module Parser =
       let libfind = libfind
     end)
 
-let handle_filename fname =
-  let fix_name = String.map (function '-' | '.' | '+' -> '_' | c -> c) in
-  if convertfilename then
-    if Filename.check_suffix fname ".cat" then
-      printf "%s\n" (fix_name (Filename.chop_suffix fname ".cat") ^ ".v")
-    else
-      (eprintf "not a .cat file name, unsure what to convert\n"; exit 1)
+let normalize_filename fname =
+  let fname = Filename.basename fname in
+  let fix_name =
+    String.map
+      (fun c -> if String.contains forbidden_chars c then '_' else c)
+  in
+  if Filename.check_suffix fname ".cat" then
+    fix_name (Filename.chop_suffix fname ".cat")
   else
-    let prelude = read_file (libfind "prelude_cat2coq.v") in
-    printf "%s\n"
-      (pprint_coq_model
-         notations
-         prelude
-         Parser.parse
-         (Parser.parse fname))
+    invalid_arg "not a .cat file name, unsure what to convert"
+
+let vfilename fname = normalize_filename fname ^ ".v"
+
+let handle_filename fname prelude outchannel =
+  let text =
+    pprint_coq_model
+      !notations
+      prelude
+      Parser.parse
+      (Parser.parse fname)
+  in
+  match outchannel with
+  | None -> ()
+  | Some outchannel -> fprintf outchannel "%s\n" text
+
+
+exception Return
+let return () : unit = raise Return
 
 let () =
+  let current_filename = ref None in
   try
-    match args with
-    | [] -> printf "%s\n" usage
-    | [fname] -> handle_filename fname
-    | _ -> eprintf "error: only one .cat file is supported at the moment"; exit 1
+    if !convertfilename then
+      !args
+      |> List.map vfilename
+      |> String.concat " "
+      |> printf "%s\n"
+      |> return;
+
+    if !all then
+      args :=
+        !args @
+          List.map (fun x -> x ^ ".cat")
+          ["aarch64"; "aarch64fences"; "aarch64-obsolete"; "arm-alt"; "arm";
+           "armfences"; "armllh"; "atom-arm"; "atom"; "c11_base"; "c11_cos";
+           "c11_los"; "c11_orig"; "c11_partialSC"; "c11_simp"; "compat";
+           "cos"; "coscat"; "cosllh"; "cos-opt"; "cross"; "doc64"; "fences";
+           "filters"; "fulleieio"; "herd"; "herdcat"; "lessrelaxed"; "LL";
+           "mini"; "minimal"; "minimalcat"; "mips"; "mipsfences";
+           "mips-tso"; "naked"; "ppc"; "ppc-checks"; "ppcfences"; "ppo";
+           "pretty"; "prettycat"; "qualcomm"; "rc11"; "riscv"; "riscv-defs";
+           "riscv-total"; "sc2"; "sc"; "sccat"; "simple-arm"; "simple-c11";
+           "stdlib"; "tso"; "uni"; "uniproc"; "uniproccat";
+           "uniproc-normw-cat"; "uniproc+sca"; "x86fences"; "x86tso"];
+    
+    if !args = [] then
+      printf "%s\n" usage
+      |> return;
+
+    let pre = if !prelude then read_file (libfind "prelude_cat2coq.v") else [] in
+    
+    (* Output Cat.v file *)
+    let () =
+      if !cat && !prelude then
+        let o = open_out "Cat.v" in
+        List.iter (fprintf o "%s\n") pre
+    in
+    
+    let trace fname = current_filename := Some fname; fname in
+    let import = ["From Coq Require Import Relations String.";
+                  "Require Import Cat."] in
+    
+    match !args, !quiet, !output_file with
+    | [fname], false, Some "-" -> handle_filename (trace fname) import (Some stdout)
+    | [fname], false, Some outfile -> handle_filename (trace fname) import (Some (open_out outfile))
+    | [fname], true, None -> handle_filename (trace fname) import None
+    | _, true, Some _ -> failwith "options -o and -q are incompatible"
+    | _, false, Some _ -> failwith "exactly one input file must be specified \
+                                    if option -o is provided"
+    | fnames, _, None ->
+       List.iter
+         (fun fname ->
+           handle_filename (trace fname) import
+             (if !quiet then None else Some (open_out (vfilename fname))))
+         fnames;
+
+    if !makefile then begin
+        let fnames = List.sort compare fnames in
+        let files = List.map normalize_filename fnames in
+        let files' = "Cat" :: files in
+        let vo l = String.concat " " (List.map (fun x -> x ^ ".vo") l) in
+        
+        let o = open_out "importeverything.v" in
+        fprintf o "Require Import Cat Relations.\n";
+        fprintf o "Require %s.\n\n" (String.concat " " files);
+        List.iter (fprintf o "Check %s.valid.\n") files;
+        close_out o;
+        
+        let o = open_out "Makefile" in
+        fprintf o "all: importeverything.vo\n";
+        fprintf o "importeverything.vo: %s\n" (vo files');
+        fprintf o "%s.vo: Cat.v\n" (vo files');
+        fprintf o "%%.vo: %%.v\n";
+        fprintf o "\tcoqc $<\n";
+      end;
+    
   with
-  | Misc.Fatal s | Failure s ->
-     eprintf "Error: %s\n" s;
+  | Misc.Fatal errmsg
+    | Failure errmsg ->
+     eprintf "Error%s: %s\n"
+       (match !current_filename with
+        | None -> ""
+        | Some n -> sprintf "(%s)" n)
+       errmsg;
      exit 1
+  | Return -> ()
