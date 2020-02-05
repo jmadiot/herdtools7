@@ -1197,8 +1197,7 @@ let () =
     if !makefile then begin
         let fnames = List.sort compare fnames in
         let files = List.map normalize_filename fnames in
-        let files' = "Cat" :: files in
-        let vo l = String.concat " " (List.map (fun x -> x ^ ".vo") l) in
+        let v l = String.concat " " (List.map (fun x -> x ^ ".v") l) in
         
         let o = open_out "importeverything.v" in
         fprintf o "Require Import Cat Relations.\n";
@@ -1207,11 +1206,23 @@ let () =
         close_out o;
         
         let o = open_out "Makefile" in
-        fprintf o "all: importeverything.vo\n";
-        fprintf o "importeverything.vo: %s\n" (vo files');
-        fprintf o "%s.vo: Cat.v\n" (vo files');
-        fprintf o "%%.vo: %%.v\n";
-        fprintf o "\tcoqc $<\n";
+        fprintf o "
+cat_vs=%s
+
+cat_vos=$(cat_vs:=o)
+
+all_vos=$(cat_vos) Cat.vo importeverything.vo
+
+all: $(all_vos)
+importeverything.vo: $(cat_vos)
+$(cat_vos): Cat.vo
+
+%%.vo: %%.v
+	coqc $<
+clean:
+	rm -f $(all_vos) $(all_vos:vo=glob)
+"
+          (v files);
       end;
     
   with
