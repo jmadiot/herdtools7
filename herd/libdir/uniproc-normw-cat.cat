@@ -4,7 +4,7 @@
 (* Computes co and fr *)
 (**********************)
 
-let invrf=rf -1
+let invrf=rf^-1
 
 (* co observations in test *)
 let obsco =
