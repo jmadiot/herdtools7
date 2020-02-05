@@ -271,7 +271,7 @@ let sets_from_execution =
   ["R"; "W"; "IW"; "FW"; "B"; "RMW"; "F"]
 
 let relations_from_execution =
-  ["rf"; "po"; "co"; "int"; "ext"; "loc"; "addr"; "data"; "ctrl"]
+  ["rf"; "po"; "co"; "int"; "ext"; "loc"; "addr"; "data"; "ctrl"; "amo"]
 
 let imports_from_execution =
   List.map
@@ -369,7 +369,7 @@ let unknown_sets =
    "Fence.tso" ]
 
 let unknown_relations =
-  ["amo"; "dmb.st"; "dsb.st"; "tag2events";
+  ["dmb.st"; "dsb.st"; "tag2events";
    "fr";
    "rmw"; "coi"; "sm";
    "coe"; "fre"; "ppo" ;
@@ -649,9 +649,15 @@ let resolve_fresh (l : name instr list) : string instr list =
 (** Remove WithFrom -- needs to be done after resolve_fresh *)
 
 let remove_withfrom (l : string instr list) : string instr list =
+  let add_arg e1 e2 =
+    match e1 with
+    | App_ (e1, Tup e2s) -> App_(e1, Tup (e2s @ [e2]))
+    | e1 -> App_ (e1, e2)
+  in
+  let eta_expanse x e = Fun_ ([x], add_arg e (Var_ x)) in
   let f : string instr -> string instr list = function
     | Withfrom (x, set, e) ->
-       [Axiom (set, App_(Cst "sig", e));
+       [Axiom (set, App_(Cst "sig", eta_expanse x e));
         Def (x, None, App_(Cst "proj1_sig", Var_ set), false)]
     | i -> [i]
   in
@@ -970,12 +976,6 @@ let pprint_coq_model
   let instrs = transform_instrs instrs in
   
   let comment s = pprint_instr (Comment s) in
-  let prelude =
-    if prelude = [] then [] else
-      comment "Import of prelude" @
-        List.map ((^) "  ") prelude @
-          comment "End of prelude"
-  in
   
   let print_instrs l = List.concat (List.map (pprint_instr) l) in
   

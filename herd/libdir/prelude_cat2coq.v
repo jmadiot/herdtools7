@@ -102,25 +102,37 @@ Notation " x ? "   := (clos_refl _ x)       (at level 30, no associativity) : ca
 
 Record execution :=
   {
+    (* Documentation for names:
+       http://diy.inria.fr/doc/herd.html#language:identifier *)
     events : Set;
-    R   : set events; (* write events *)
     W   : set events; (* read events *)
+    R   : set events; (* write events *)
     IW  : set events; (* initial writes *)
     FW  : set events; (* final writes *)
     B   : set events; (* branch events *)
     RMW : set events; (* read-modify-write events *)
     F   : set events; (* fence events *)
-    po  : relation events; (* order of instructions in thread *)
-    rf  : relation events; (* read from *)
+    
+    po  : relation events; (* program order *)
+    addr: relation events; (* address dependency *)
+    data: relation events; (* data dependency *)
+    ctrl: relation events; (* control dependency *)
+    rmw : relation events; (* read-exclusive write-exclusive pair *)
+    amo : relation events; (* atomic modify *)
+    
+    rf  : relation events; (* read-from *)
+    loc : relation events; (* same location *)
+    ext : relation events; (* external *)
+    int : relation events; (* internal *)
+    
     co  : relation events; (* coherence order, aka
                                 mo (memory order), aka
-                                ws (write serialization) *)
-    int : relation events; (* events occuring in the same thread *)
-    ext : relation events; (* events occuring in different threads *)
-    loc : relation events; (* events occuring on the same location *)
-    addr: relation events; (* address dependence *)
-    data: relation events; (* data dependence *)
-    ctrl: relation events; (* ctrl dependence *)
+                                ws (write serialization)
+                            usually /not/ used by cat files *)
+    
+    (* Two functions for unknown sets or relations that are found in
+    .cat files. cat2coq uses [unknown_set "ACQ"] when translating
+    some parts of cat files about C11 *)
     unknown_set : string -> set events;
     unknown_relation : string -> relation events;
   }.
