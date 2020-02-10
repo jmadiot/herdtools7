@@ -12,7 +12,7 @@ let pprint_op1 : AST.op1 -> string -> string =
   | Star -> sprintf "%s^*"
   | Opt -> sprintf "%s?"
 
-type op2 = Union | Cons | Seq | Inter | Sub | Cartes | Cast | And
+type op2 = Union | Cons | Seq | Inter | Sub | Cartes | Cast | And | Arr
 
 let pprint_op2 = function
   | Union -> "∪"
@@ -23,6 +23,7 @@ let pprint_op2 = function
   | Cartes -> "*"
   | Cast -> ":"
   | And -> "/\\"
+  | Arr -> "->"
 
 type exp =
   | Var_ of string
@@ -174,9 +175,10 @@ let level_op2 = function
   | Cartes -> 40
   | Cast -> 2
   | And -> 80
+  | Arr -> 99
 
 let right_associative = function
-  | Union | Cons | Seq | Inter | And -> true
+  | Union | Cons | Seq | Inter | And | Arr -> true
   | Sub | Cartes | Cast -> false
 
 let rec cascade_op (o : op2) : exp -> exp list =
@@ -230,8 +232,10 @@ let print_exp = pprint_exp_scope
 
 (** Instructions, parameterized by a type for possibly-generated names *)
 
+type definition_kind = Normal_definition | Test_definition | Condition
+
 type 'name instr =
-  | Def of 'name * string option (* possible type annotation*) * exp * bool (* is a test *)
+  | Def of 'name * string option (* possible type annotation*) * exp * definition_kind
   | Axiom of 'name * exp
   | Inductive of (string * 'name * exp) list
   | Withfrom of string * 'name * exp
@@ -275,7 +279,7 @@ let relations_from_execution =
 
 let imports_from_execution =
   List.map
-    (fun x -> Def (x, None, App_ (Cst x, Cst "c"), false))
+    (fun x -> Def (x, None, App_ (Cst x, Cst "c"), Normal_definition))
     (sets_from_execution
      @ relations_from_execution
      @ ["unknown_set"; "unknown_relation"]
@@ -380,9 +384,10 @@ let unknown_relations =
 let is_rel x = List.mem x unknown_relations
 
 let unknown_def x =
-  if is_rel x
-  then Def (x, None, App_ (Cst "unknown_relation", Cst (sprintf "\"%s\"" x)), false)
-  else Def (x, None, App_ (Cst "unknown_set", Cst (sprintf "\"%s\"" x)), false)
+  Def (x, None,
+       App_ (Cst ("unknown_" ^ if is_rel x then "relation" else "set"),
+             Cst (sprintf "\"%s\"" x)),
+       Normal_definition)
 
 let unknown_axiom x =
   if is_rel x
@@ -588,14 +593,16 @@ let rec translate_instr k (parse_file : string -> AST.ins list) (i : AST.ins)
      @ List.concat (List.map (translate_instr k parse_file) (parse_file filename))
      @ [Comment "DEDENT"]
      @ [Comment (sprintf "End of import from %s" filename)]
-  | Test ((_, _, test, e, None), _) -> [Def (Fresh "Test", None, of_test test k e, true)]
-  | Test ((_, _, test, e, Some x), _) -> [Def (Normal x, None, of_test test k e, true)]
+  | Test ((_, _, test, e, None), _) ->
+     [Def (Fresh "Test", None, of_test test k e, Test_definition)]
+  | Test ((_, _, test, e, Some x), _) ->
+     [Def (Normal x, None, of_test test k e, Test_definition)]
   | Let (_, [(_, Pvar Some name, _)]) when List.mem name remove_defs ->
      [Comment (sprintf "Definition of %s already included in the prelude" name)]
   | Let (_, bindings) ->
      let f : AST.binding -> _ = function
-       | (_, Pvar None, exp) -> Def (Fresh "_", None, translate_exp k exp, false)
-       | (_, Pvar Some name, exp) -> Def (Normal name, None, translate_exp k exp, false)
+       | (_, Pvar None, exp) -> Def (Fresh "_", None, translate_exp k exp, Normal_definition)
+       | (_, Pvar Some name, exp) -> Def (Normal name, None, translate_exp k exp, Normal_definition)
        | (_, Ptuple _, _) -> invalid_arg "toplevel let with tuple"
      in List.map f bindings
   | Rec (loc, bds, Some test) ->
@@ -621,6 +628,7 @@ let rec translate_instr k (parse_file : string -> AST.ins list) (i : AST.ins)
 
 let translate_instrs keepnotations parse instrs =
   List.concat (List.map (translate_instr keepnotations parse) instrs)
+
 
 (** Transform a list of instructions with Fresh-marked names to
    instructions with normal string names *)
@@ -648,7 +656,7 @@ let resolve_fresh (l : name instr list) : string instr list =
 
 (** Remove WithFrom -- needs to be done after resolve_fresh *)
 
-let remove_withfrom (l : string instr list) : string instr list =
+let remove_withfrom_axiom_set (l : string instr list) : string instr list =
   let add_arg e1 e2 =
     match e1 with
     | App_ (e1, Tup e2s) -> App_(e1, Tup (e2s @ [e2]))
@@ -658,10 +666,25 @@ let remove_withfrom (l : string instr list) : string instr list =
   let f : string instr -> string instr list = function
     | Withfrom (x, set, e) ->
        [Axiom (set, App_(Cst "sig", eta_expanse x e));
-        Def (x, None, App_(Cst "proj1_sig", Var_ set), false)]
+        Def (x, None, App_(Cst "proj1_sig", Var_ set), Normal_definition)]
     | i -> [i]
   in
   List.concat (List.map f l)
+
+
+let remove_withfrom (l : string instr list) : string instr list =
+  let add_arg e1 e2 =
+    match e1 with
+    | App_ (e1, Tup e2s) -> App_(e1, Tup (e2s @ [e2]))
+    | e1 -> App_ (e1, e2)
+  in
+  let collect : string instr -> string instr list = function
+    | Withfrom (x, set, e) ->
+       [Axiom (x, App_ (Cst "relation", Cst "events"));
+        Def (set, None, add_arg e (Var_ x), Condition)]
+    | i -> [i]
+  in
+  List.concat (List.map collect l)
 
 
 (** Shadowing *)
@@ -768,7 +791,7 @@ let remove_trywith defined : string instr list -> string instr list =
       | Comment s -> Comment s)
 
 
-(** Collect all tests and add them at the end *)
+(** Functions on lists *)
 
 let rec filter_map (f : 'a -> 'b option) : 'a list -> 'b list =
   function
@@ -784,6 +807,18 @@ let rec fold_right1 (f : 'a -> 'a -> 'a) : 'a list -> 'a =
   | [x] -> x
   | x :: xs -> f x (fold_right1 f xs)
 
+let extract_from_list (f : 'a -> 'b option) : 'a list -> ('a list * 'b list) =
+  let rec extr al bl = function
+    | [] -> (List.rev al, List.rev bl)
+    | a :: l ->
+       match f a with
+       | None -> extr (a :: al) bl l
+       | Some b -> extr al (b :: bl) l
+  in extr [] []
+
+
+(** Collects tests and conditions to make the validity condition at the end *)
+
 let collect_tests instrs : string instr list =
   (* [Def ("valid", None, Cst "(\* TBD *\)", false)]; *)
   let instrs =
@@ -793,7 +828,7 @@ let collect_tests instrs : string instr list =
   in
   let testnames =
     filter_map
-      (function Def (x, _, _, true) -> Some x | _ -> None)
+      (function Def (x, _, _, Test_definition) -> Some x | _ -> None)
       instrs
   in
   let alltests =
@@ -803,7 +838,18 @@ let collect_tests instrs : string instr list =
              (fun x y -> Op2 (And, x, y))
              (List.map (fun x -> Var_ x) testnames)
   in
-  instrs @ [Def ("valid", Some "Prop", alltests, false)]
+  let instrs, conds =
+    extract_from_list
+      (function Def (_, _, e, Condition) -> Some e | _ -> None)
+      instrs
+  in
+  let addconditions =
+    List.fold_right
+      (fun cond p -> Op2 (Arr, cond, p))
+      conds
+  in
+  instrs @ [Def ("valid", Some "Prop", addconditions alltests, Test_definition)]
+
 
 (** Behaves as [f] but checks injectivity where it is called *)
 
@@ -939,7 +985,7 @@ let transform_instrs (l : name instr list) : string instr list =
   
   let defined_before = union uses (union prelude (of_list ondemand))  in
   l
-  |> (@) [Def ("valid", None, Cst "(* TBD *)", false)]
+  |> (@) [Def ("valid", None, Cst "(* TBD *)", Test_definition)]
   |> resolve_shadowing defined_before
   |> collect_tests
   |> remove_trywith defined_before
