@@ -100,7 +100,7 @@ Notation " x ? "   := (clos_refl _ x)       (at level 30, no associativity) : ca
 
 (* Execution given as an argument to the model *)
 
-Record execution :=
+Record candidate :=
   {
     (* Documentation for names:
        http://diy.inria.fr/doc/herd.html#language:identifier *)
@@ -124,11 +124,6 @@ Record execution :=
     loc : relation events; (* same location *)
     ext : relation events; (* external *)
     int : relation events; (* internal *)
-    
-    co  : relation events; (* coherence order, aka
-                                mo (memory order), aka
-                                ws (write serialization)
-                            usually /not/ used by cat files *)
     
     (* Two functions for unknown sets or relations that are found in
     .cat files. cat2coq uses [unknown_set "ACQ"] when translating

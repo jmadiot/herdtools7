@@ -271,11 +271,11 @@ let sets_from_execution =
   ["R"; "W"; "IW"; "FW"; "B"; "RMW"; "F"]
 
 let relations_from_execution =
-  ["rf"; "po"; "co"; "int"; "ext"; "loc"; "addr"; "data"; "ctrl"; "amo"]
+  ["rf"; "po"; "int"; "ext"; "loc"; "addr"; "data"; "ctrl"; "amo"]
 
 let imports_from_execution =
   List.map
-    (fun x -> Def (x, None, App_ (Cst x, Cst "exec"), false))
+    (fun x -> Def (x, None, App_ (Cst x, Cst "c"), false))
     (sets_from_execution
      @ relations_from_execution
      @ ["unknown_set"; "unknown_relation"]
@@ -293,8 +293,8 @@ let axioms =
 let start_text = "\
 Section Model.
 
-Variable exec : execution.
-Definition events := events exec.
+Variable c : candidate.
+Definition events := events c.
 
 (* Makes possible to default to events when A cannot be inferred *)
 Instance SetLike_set_events : SetLike (set events) := SetLike_set events.
@@ -370,7 +370,7 @@ let unknown_sets =
 
 let unknown_relations =
   ["dmb.st"; "dsb.st"; "tag2events";
-   "fr";
+   "fr"; "co";
    "rmw"; "coi"; "sm";
    "coe"; "fre"; "ppo" ;
    "strong"; "light";
