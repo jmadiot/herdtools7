@@ -26,17 +26,16 @@ let pprint_op2 = function
   | Arr -> "->"
 
 type exp =
-  | Var_ of string
-  | Cst of string (* a variable introduced by this translation. It
-                     cannot be substituted *)
-  | App_ of exp * exp
-  | Fun_ of string list * exp
-  | Let_ of string * exp * exp
+  | Var of string
+  | Cst of string (* non-substitutable variable *)
+  | App of exp * exp
+  | Fun of string list * exp
+  | Let of string * exp * exp
   | Fix of string * string list * exp
   | Tup of exp list
   | Op1 of AST.op1 * exp
   | Op2 of op2 * exp * exp
-  | Try_ of exp * exp
+  | Try of exp * exp
   | Annot of string * exp
 
 let rec free_vars : exp -> StringSet.t =
@@ -44,16 +43,16 @@ let rec free_vars : exp -> StringSet.t =
   let ( + ) = union in
   let f = free_vars in
   function
-  | Var_ x -> singleton x
+  | Var x -> singleton x
   | Cst x -> singleton x
-  | App_ (e1, e2) -> f e1 + f e2
-  | Fun_ (xs, e) -> List.fold_right remove xs (f e)
-  | Let_ (x, e1, e2) -> f e1 + remove x (f e2)
-  | Fix (x, xs, e) -> f (Fun_ (x :: xs, e))
+  | App (e1, e2) -> f e1 + f e2
+  | Fun (xs, e) -> List.fold_right remove xs (f e)
+  | Let (x, e1, e2) -> f e1 + remove x (f e2)
+  | Fix (x, xs, e) -> f (Fun (x :: xs, e))
   | Tup es -> unions (List.map f es)
   | Op1 (_, e1) -> f e1
   | Op2 (_, e1, e2) -> f e1 + f e2
-  | Try_ (e1, e2) -> f e1 + f e2
+  | Try (e1, e2) -> f e1 + f e2
   | Annot (_, e) -> f e
 
 
@@ -64,16 +63,16 @@ let rec tried_vars : exp -> StringSet.t =
   let ( + ) = union in
   let f = tried_vars in
   function
-  | Var_ _ -> empty
+  | Var _ -> empty
   | Cst _ -> empty
-  | App_ (e1, e2) -> f e1 + f e2
-  | Fun_ (xs, e) -> List.fold_right remove xs (f e)
-  | Let_ (x, e1, e2) -> f e1 + remove x (f e2)
-  | Fix (x, xs, e) -> f (Fun_ (x :: xs, e))
+  | App (e1, e2) -> f e1 + f e2
+  | Fun (xs, e) -> List.fold_right remove xs (f e)
+  | Let (x, e1, e2) -> f e1 + remove x (f e2)
+  | Fix (x, xs, e) -> f (Fun (x :: xs, e))
   | Tup es -> unions (List.map f es)
   | Op1 (_, e1) -> f e1
   | Op2 (_, e1, e2) -> f e1 + f e2
-  | Try_ (e1, e2) -> free_vars e1 + f e2
+  | Try (e1, e2) -> free_vars e1 + f e2
   | Annot (_, e) -> f e
 
 
@@ -84,16 +83,16 @@ let rec used_vars : exp -> StringSet.t =
   let ( + ) = union in
   let f = used_vars in
   function
-  | Var_ x -> singleton x
+  | Var x -> singleton x
   | Cst _ -> empty
-  | App_ (e1, e2) -> f e1 + f e2
-  | Fun_ (xs, e) -> List.fold_right remove xs (f e)
-  | Let_ (x, e1, e2) -> f e1 + remove x (f e2)
-  | Fix (x, xs, e) -> f (Fun_ (x :: xs, e))
+  | App (e1, e2) -> f e1 + f e2
+  | Fun (xs, e) -> List.fold_right remove xs (f e)
+  | Let (x, e1, e2) -> f e1 + remove x (f e2)
+  | Fix (x, xs, e) -> f (Fun (x :: xs, e))
   | Tup es -> unions (List.map f es)
   | Op1 (_, e1) -> f e1
   | Op2 (_, e1, e2) -> f e1 + f e2
-  | Try_ (_, e2) -> f e2
+  | Try (_, e2) -> f e2
   | Annot (_, e) -> f e
 
 
@@ -126,7 +125,7 @@ let rec subst (sub : exp StringMap.t) : exp -> exp =
       (* If [x] appears in the codomain of [sub] we must alpha-convert
          it to a locally fresh [x'] *)
       let x' = fresh x (union fv_sub (free_vars body)) in
-      let body' = subst (StringMap.singleton x (Var_ x')) body in
+      let body' = subst (StringMap.singleton x (Var x')) body in
       (x', body', sub)
     else
       (* Otherwise, nothing to do, except removing a possible [x] from
@@ -144,27 +143,27 @@ let rec subst (sub : exp StringMap.t) : exp -> exp =
        in (x' :: xs', body'', sub'')
   in
   function
-  | Var_ x          -> StringMap.safe_find (Var_ x) x sub
+  | Var x           -> StringMap.safe_find (Var x) x sub
   | Cst s           -> Cst s
-  | App_ (e1, e2)   -> App_(subst sub e1, subst sub e2)
-  | Fun_ (xs, e)    -> let (xs, e, sub) = abs' xs e sub in
-                       Fun_(xs, subst sub e)
-  | Let_ (x, e1, e2) -> let e1 = subst sub e1 in (* x not binding in e1 *)
+  | App (e1, e2)    -> App (subst sub e1, subst sub e2)
+  | Fun (xs, e)     -> let (xs, e, sub) = abs' xs e sub in
+                       Fun(xs, subst sub e)
+  | Let (x, e1, e2) -> let e1 = subst sub e1 in (* x not binding in e1 *)
                        let (x, e2, sub) = abs x e2 sub in
-                       Let_ (x, e1, subst sub e2)
+                       Let (x, e1, subst sub e2)
   | Fix (x, xs, e)  -> let (xxs, e, sub) = abs' (x :: xs) e sub in
                        Fix (List.hd xxs, List.tl xxs, subst sub e)
   | Tup es          -> Tup (List.map (subst sub) es)
   | Op1 (o, e1)     -> Op1 (o, subst sub e1)
   | Op2 (o, e1, e2) -> Op2 (o, subst sub e1, subst sub e2)
-  | Try_ (e1, e2)    -> Try_ (subst sub e1, subst sub e2)
+  | Try (e1, e2)    -> Try (subst sub e1, subst sub e2)
   | Annot (s, e)    -> Annot (s, subst sub e)
 
 let subst_with_var (sub : string StringMap.t) : exp -> exp =
-  subst (StringMap.map (fun x -> Var_ x) sub)
+  subst (StringMap.map (fun x -> Var x) sub)
 
 
-(** Pretty-printing, with greedy currying *)
+(** Pretty-printing, with aggressive currying *)
 
 let level_op2 = function
   | Union -> 70
@@ -186,20 +185,20 @@ let rec cascade_op (o : op2) : exp -> exp list =
   | Op2 (o', e1, e2) when o = o' -> e1 :: cascade_op o e2
   | e -> [e]
 
-let rec pprint_exp e =
-  let p = pprint_exp in
+let rec pprint_exp verbosity e =
+  let p = pprint_exp verbosity in
   let ppar e = match e with
-    | Var_ x | Cst x -> x
+    | Var x | Cst x -> x
     | Op1 (AST.ToId, _) -> p e
     | _ -> "(" ^ p e ^ ")"
   in
   let open String in
   match e with
-  | Var_ x -> x
+  | Var x -> x
   | Cst s -> s
-  | App_(App_(e1, e2), e3) -> ppar e1 ^ " " ^ ppar e2 ^ " " ^ ppar e3
-  | App_(e1, Tup es) -> ppar e1 ^ " " ^ concat " " (List.map ppar es)
-  | App_(e1, e2) -> ppar e1 ^ " " ^ ppar e2
+  | App (App (e1, e2), e3) -> ppar e1 ^ " " ^ ppar e2 ^ " " ^ ppar e3
+  | App (e1, Tup es) -> ppar e1 ^ " " ^ concat " " (List.map ppar es)
+  | App (e1, e2) -> ppar e1 ^ " " ^ ppar e2
   | Op1 (o, e1) -> pprint_op1 o (ppar e1)
   | Op2 (o, e1, e2) ->
      if right_associative o then
@@ -207,25 +206,26 @@ let rec pprint_exp e =
      else
        sprintf "%s %s %s" (ppar e1) (pprint_op2 o) (ppar e2)
   | Tup l -> "(" ^ (concat ", " (List.map p l)) ^ ")"
-  | Fun_(xs, e) -> sprintf "fun %s => %s" (concat " " xs) (p e)
+  | Fun (xs, e) -> sprintf "fun %s => %s" (concat " " xs) (p e)
   | Fix (f, xs, body) -> sprintf "fix %s %s := %s" f (concat " " xs) (p body)
-  | Let_ (x, e1, e2) -> sprintf "let %s := %s in %s" x (p e1) (p e2)
+  | Let (x, e1, e2) -> sprintf "let %s := %s in %s" x (p e1) (p e2)
+  | Annot (_, e) when verbosity <= 0 -> p e
   | Annot (comment, e) -> sprintf "(*%s*) %s" comment (p e)
-  | Try_ (e1, e2) -> sprintf "try %s with %s" (p e1) (p e2)
+  | Try (e1, e2) -> sprintf "try %s with %s" (p e1) (p e2)
 
 let rec has_notations e : bool =
   let f = has_notations in
   match e with
-  | Var_ _ | Cst _ -> false
+  | Var _ | Cst _ -> false
   | Op1 (_, _) | Op2 (_, _, _) -> true
-  | Fun_(_, e) | Fix (_, _, e) | Annot (_, e) -> f e
-  | App_(e1, e2) | Let_ (_, e1, e2) | Try_ (e1, e2) -> f e1 || f e2
+  | Fun(_, e) | Fix (_, _, e) | Annot (_, e) -> f e
+  | App (e1, e2) | Let (_, e1, e2) | Try (e1, e2) -> f e1 || f e2
   | Tup es -> List.exists f es
 
-let pprint_exp_scope e =
+let pprint_exp_scope verbosity e =
   if has_notations e
-  then "(" ^ pprint_exp e ^ ")%cat"
-  else pprint_exp e
+  then "(" ^ pprint_exp verbosity e ^ ")%cat"
+  else pprint_exp verbosity e
 
 let print_exp = pprint_exp_scope
 
@@ -236,7 +236,7 @@ type definition_kind = Normal_definition | Test_definition | Condition
 
 type 'name instr =
   | Def of 'name * string option (* possible type annotation*) * exp * definition_kind
-  | Axiom of 'name * exp
+  | Variable of 'name * exp
   | Inductive of (string * 'name * exp) list
   | Withfrom of string * 'name * exp
   | Comment of string
@@ -252,7 +252,7 @@ let free_vars_of_instr (fv: 'a -> string list) : 'a instr -> StringSet.t =
   (* let (+) s = function Normal x -> add x s | Fresh _ -> s in *)
   function
   | Def (x, _, e, _) -> fv x + free_vars e
-  | Axiom (x, e) -> fv x + free_vars e
+  | Variable (x, e) -> fv x + free_vars e
   | Inductive defs ->
      unions (List.map (fun (x, y, e) -> [x] + (fv y + free_vars e)) defs)
   | Withfrom (x, y, e) -> [x] + (fv y + free_vars e)
@@ -262,37 +262,26 @@ let free_vars_of_instrs (fv: 'a -> string list) (l : 'a instr list) =
   StringSet.unions (List.map (free_vars_of_instr fv) l)
 
 
-(** Definitions that are too complex to translate, so we remove them
-   and define them in the prelude *)
+(** Given as aguments to the model *)
 
-let remove_defs = 
-  ["co_locs"; "cross"; "map"]
+let candidate_fields =
+  ["R"; "W"; "IW"; "FW"; "B"; "RMW"; "F";
+   "rf"; "po"; "int"; "ext"; "loc"; "addr"; "data"; "ctrl"; "amo"]
 
-
-(** Definitions that are given as aguments to the model *)
-
-let sets_from_execution =
-  ["R"; "W"; "IW"; "FW"; "B"; "RMW"; "F"]
-
-let relations_from_execution =
-  ["rf"; "po"; "int"; "ext"; "loc"; "addr"; "data"; "ctrl"; "amo"]
-
-let imports_from_execution : string instr list =
+let imports_candidate_fields : string instr list =
   List.map
-    (fun x -> Def (x, None, App_ (Cst x, Cst "c"), Normal_definition))
-    (sets_from_execution
-     @ relations_from_execution
-     @ ["unknown_set"; "unknown_relation"]
-    )
+    (fun x -> Def (x, None, App (Cst x, Cst "c"), Normal_definition))
+    (candidate_fields @ ["unknown_set"; "unknown_relation"])
+
+let rel_or_set s =
+  if String.length s > 0 && 'a' <= s.[0] && s.[0] <= 'z'
+  then "relation"
+  else "set"
 
 let axioms =
   List.map
-    (fun x -> Axiom (x, App_ (Cst "set", Cst "events")))
-    sets_from_execution
-  @
-    List.map
-      (fun x -> Axiom (x, App_ (Cst "relation", Cst "events")))
-      relations_from_execution
+    (fun x -> Variable (x, App (Cst (rel_or_set x), Cst "events")))
+    candidate_fields
 
 
 (** Before generated code *)
@@ -303,7 +292,6 @@ Section Model.
 Variable c : candidate.
 Definition events := events c.
 
-(* Makes possible to default to events when A cannot be inferred *)
 Instance SetLike_set_events : SetLike (set events) := SetLike_set events.
 Instance SetLike_relation_events : SetLike (relation events) := SetLike_relation events.
 "
@@ -343,102 +331,33 @@ Definition valid := fun (c : candidate) (w : witness c) => %s.
        (String.concat " " (List.map (sprintf "(%s c w)") relations)))
 
 
+(** Definitions that are too complex to translate, so we remove them
+   and define them in the prelude *)
+
+let definitions_to_remove =
+  ["co_locs"; "cross"; "map"]
+
+
 (** Definitions that are in the prelude but can be shadowed *)
 
-let shadowable =
-  sets_from_execution @
-    relations_from_execution @
-      [ "empty_pred"; "universal"; "complement"; "union"; "intersection";
-        "diff"; "rel_seq"; "rel_inv"; "cartesian"; "incl"; "id";
-        "to_id"; "domain"; "range"; "diagonal"; "acyclic"; "is_empty";
-        "irreflexive"; "clos_trans"; "clos_refl_trans"; "clos_refl";
-        "set"; "relation"; "not"; "total_order"; "linearisations";
-        "set_flatten"; "set_map"; "classes-loc"; "_";  "emptyset";
-        "empty"; "sig"; "M" ]
-
-let in_prelude = remove_defs @ shadowable
-
-let fence_sets = [
-    ("X86", ["MFENCE"; "SFENCE"; "LFENCE"]);
-    ("PPC", ["SYNC"; "LWSYNC"; "EIEIO"; "ISYNC"]);
-    ("ARM", ["DMB"; "DMB.ST"; "DSB"; "DSB.ST"; "ISB"]);
-    ("MIPS", ["SYNC"]);
-    ("AArch64",
-     let conds =
-       [ ""; ".SY"; ".LD"; ".ST";
-         ".ISH"; ".ISHLD"; ".ISHST";
-         ".NSH"; ".NSHLD"; ".NSHST";
-         ".OSH"; ".OSHLD"; ".OSHST" ]
-     in ["ISB"; "ISB.SY"]
-        @ List.map ((^) "DMB") conds
-        @ List.map ((^) "DSB") conds
-    );
-  ]
-
-let fence_sets =
-  fence_sets
-  (* We can detect the architecture or say it Sys.argv instead of just
-     adding everything like as below *)
-  |> List.map snd
-  |> List.concat
-  |> List.sort compare
-  |> let rec uniq = function
-       | [] -> []
-       | [x] -> [x]
-       | a :: b :: l when a = b -> uniq (a :: l)
-       | a :: b :: l -> a :: uniq (b :: l)
-     in uniq
-
-let unknown_sets =
-  ["L"; "A"; "X"; "I"; "UL"; "E"; "LS"; "LK"; "CON"; "Q"; "T";
-   "NoRet"; "fence";
-   "Sc"; "SC";
-   "ACQ_REL"; "ACQ"; "REL"; "RLX";
-   "AcqRel"; "Acq"; "Rel";
-   "Fence.r.r" ; "Fence.r.w" ; "Fence.r.rw" ;
-   "Fence.w.r" ; "Fence.w.w" ; "Fence.w.rw" ;
-   "Fence.rw.r"; "Fence.rw.w"; "Fence.rw.rw";
-   "Fence.tso" ]
-
-let unknown_relations =
-  ["dmb.st"; "dsb.st"; "tag2events";
-   "fr"; "co";
-   "rmw"; "coi"; "sm";
-   "coe"; "fre"; "ppo" ;
-   "strong"; "light";
-   "cc0"; "ci0"; "ic0"; "ii0"; (* for ppo.cat *)
-   "iico_ctrl"; "iico_data" ]
-
-let is_rel x = List.mem x unknown_relations
+let defined_in_prelude =
+  definitions_to_remove @
+    [ "universal"; "complement"; "union"; "intersection";
+      "diff"; "rel_seq"; "rel_inv"; "cartesian"; "incl"; "id";
+      "domain"; "range"; "diagonal"; "acyclic"; "is_empty";
+      "irreflexive"; "clos_trans"; "clos_refl_trans"; "clos_refl";
+      "set"; "relation"; "not"; "StrictTotalOrder"; "linearisations";
+      "set_flatten"; "classes-loc"; "_";  "emptyset";
+      "empty"; "sig"; "M" ]
 
 let unknown_def x =
   Def (x, None,
-       App_ (Cst ("unknown_" ^ if is_rel x then "relation" else "set"),
+       App (Cst ("unknown_" ^ rel_or_set x),
              Cst (sprintf "\"%s\"" x)),
        Normal_definition)
 
 let unknown_axiom x =
-  if is_rel x
-  then Axiom (x, App_ (Cst "relation", Cst "events"))
-  else Axiom (x, App_ (Cst "set", Cst "events"))
-
-let on_demand =
-  let oftype ty = List.map (fun id -> (id, ty)) in
-  oftype "set events" fence_sets
-  @ oftype "set events" unknown_sets
-  @ oftype "relation events" unknown_relations
-
-
-
-let duplicates (l : 'a list) : 'a list =
-  List.filter (fun x -> 1 <> List.length (List.find_all ((=) x) l)) l
-
-let check_no_duplicates : unit =
-  List.map fst on_demand @ shadowable
-  |> duplicates
-  |> function
-    | [] -> ()
-    | d -> failwith ("internal error; duplications: " ^ String.concat ", " d)
+  Variable (x, App (Cst (rel_or_set x), Cst "events"))
 
 
 (** Type annotations for cases for which Cst fails at inference. This
@@ -460,21 +379,23 @@ let special_cases =
 
 let t = ref 0
 
-let pprint_instr (i : string instr) : string list =
+let pprint_instr verbosity (i : string instr) : string list =
   let opt = function None -> "" | Some s -> ": " ^ s ^ " " in
   let indent = String.make !t ' ' in
+  let pprint_exp = pprint_exp verbosity in
   match i with
-  | Comment "INDENT" -> t := !t + 2; []
-  | Comment "DEDENT" -> t := !t - 2; []
+  | Comment "INDENT" -> if verbosity >= 1 then t := !t + 2; []
+  | Comment "DEDENT" -> if verbosity >= 1 then t := !t - 2; []
+  | Comment _ when verbosity <= 0 -> []
   | _ ->
      [indent ^
        match i with
        | Comment s -> sprintf "(* %s *)" s
-       | Def (x, ty, Fun_ (xs, e), _) ->
+       | Def (x, ty, Fun (xs, e), _) ->
           sprintf "Definition %s %s %s:= %s."
             x (String.concat " " xs) (opt ty) (pprint_exp e)
        | Def (x, ty, e, _) -> sprintf "Definition %s %s:= %s." x (opt ty) (pprint_exp e)
-       | Axiom (x, e) -> sprintf "Variable %s : %s." x (pprint_exp e)
+       | Variable (x, e) -> sprintf "Variable %s : %s." x (pprint_exp e)
        | Inductive defs ->
           let f (x, cx, e) =
             sprintf "%s : relation _ := %s : incl (%s) %s" x cx (pprint_exp e) x
@@ -486,10 +407,10 @@ let pprint_instr (i : string instr) : string list =
      ]
 
 
-(** Translating base operators *)
+(** Eliminating base operators *)
 
 let exp_of_op1 : AST.op1 -> exp =
-  let app (x, y) = App_ (x, y) in
+  let app (x, y) = App (x, y) in
   let open AST in
   function
   | Plus -> app (Cst "clos_trans", Cst "_")
@@ -497,15 +418,15 @@ let exp_of_op1 : AST.op1 -> exp =
   | Opt -> app (Cst "clos_refl", Cst "_")
   | Comp -> Cst "complement"
   | Inv -> Cst "rel_inv"
-  | ToId -> Cst "to_id"
+  | ToId -> Cst "diagonal"
 
-let translate_op1 (o : AST.op1) e = App_ (exp_of_op1 o, e)
+let translate_op1 (o : AST.op1) e = App (exp_of_op1 o, e)
 
 let translate_op1_keep (o : AST.op1) e =
   Op1 (o, e)
 
 let rec translate_op2 (o : AST.op2) (es : exp list) : exp =
-  let app2 x e1 e2 = App_ (App_ (Cst x, e1), e2) in
+  let app2 x e1 e2 = App (App (Cst x, e1), e2) in
   match o, es with
   | AST.Union, [] -> Cst "empty"
   | AST.Union, [e] -> e
@@ -546,7 +467,7 @@ let rec translate_exp (keepnotations : bool) (e : AST.exp) : exp =
   let invalid_arg s = invalid_arg ("translate_exp: " ^ s) in
   let rec lets e2 = function
     | [] -> e2
-    | (x, e1) :: l -> Let_ (x, e1, lets e2 l)
+    | (x, e1) :: l -> Let (x, e1, lets e2 l)
   in
   let nicer_binding = function
     | (_, AST.Pvar None, e1) -> ("_", e1)
@@ -558,40 +479,40 @@ let rec translate_exp (keepnotations : bool) (e : AST.exp) : exp =
     then (translate_op1_keep, translate_op2_keep)
     else (translate_op1, translate_op2)
   in
-  let open AST in
+  let var x = Var x in
   match e with
-  | Konst (_, Empty (SET | RLN)) -> Cst "empty"
-  | Konst (_, Universe (SET | RLN)) -> Cst "universal"
-  | Tag (_, tag) -> Cst (sprintf "Tag \"%s\"" tag)
-  | Var (_, k) -> Var_ k
-  | Op1 (_, o, exp) -> op1 o (f exp)
-  | Op (_, o, args) -> op2 o (List.map f args)
-  | App (_, e1, e2) -> App_ (f e1, f e2)
-  | Try (_, e1, e2) -> Try_ (f e1, f e2)
-  | Bind (_, bindings, e2) ->
+  | AST.Konst (_, AST.Empty _) -> Cst "empty"
+  | AST.Konst (_, AST.Universe _) -> Cst "universal"
+  | AST.Tag (_, tag) -> Cst (sprintf "Tag \"%s\"" tag)
+  | AST.Var (_, x) -> var x
+  | AST.Op1 (_, o, exp) -> op1 o (f exp)
+  | AST.Op (_, o, args) -> op2 o (List.map f args)
+  | AST.App (_, e1, e2) -> App (f e1, f e2)
+  | AST.Try (_, e1, e2) -> Try (f e1, f e2)
+  | AST.Bind (_, bindings, e2) ->
      bindings
      |> List.map nicer_binding
      |> List.map (fun (x, e1) -> (x, f e1))
      |> lets (f e2)
-  | BindRec (_, bindings, e2) ->
-     (* Warning: completely untested *)
+  | AST.BindRec (_, bindings, e2) ->
+     (* Has never been tested! *)
      begin match bindings with
      | [] -> invalid_arg "empty let rec in"
      | _ :: _ :: _ -> invalid_arg "mutual let rec in"
-     | [(_, Ptuple _, _)] -> invalid_arg "destructuring in let rec"
-     | [(_, Pvar None, _)] -> invalid_arg "nameless let rec"
-     | [(_, Pvar (Some name), (Fun (_, pat, body, _, _)))] ->
-        Let_ (name, Fix (name, vars_of_pat pat, f body), f e2)
-     | [(_, Pvar _, _)] -> invalid_arg "let rec in with no argument"
+     | [(_, AST.Ptuple _, _)] -> invalid_arg "destructuring in let rec"
+     | [(_, AST.Pvar None, _)] -> invalid_arg "nameless let rec"
+     | [(_, AST.Pvar (Some name), (AST.Fun (_, pat, body, _, _)))] ->
+        Let (name, Fix (name, vars_of_pat pat, f body), f e2)
+     | [(_, AST.Pvar _, _)] -> invalid_arg "let rec in with no argument"
      end
-  | Fun (_, pat, exp, _name, _freevars) ->
-     Fun_ (vars_of_pat pat, f exp)
-  | ExplicitSet (_, []) -> Op2 (Cast, Cst "empty", App_ (Cst "set", Cst "_"))
-  | ExplicitSet (_, [e]) -> App_ (Cst "singleton", f e)
-  | ExplicitSet (l, (e :: t)) -> Op2 (Cons, f e, f (ExplicitSet (l, t)))
-  | Match _ -> invalid_arg "match not implemented"
-  | MatchSet _ -> invalid_arg "matchset not implemented"
-  | If _ -> invalid_arg "if"
+  | AST.Fun (_, pat, exp, _name, _freevars) ->
+     Fun (vars_of_pat pat, f exp)
+  | AST.ExplicitSet (_, []) -> Op2 (Cast, Cst "empty", App (Cst "set", Cst "_"))
+  | AST.ExplicitSet (_, [e]) -> App (Cst "singleton", f e)
+  | AST.ExplicitSet (l, (e :: t)) -> Op2 (Cons, f e, f (AST.ExplicitSet (l, t)))
+  | AST.Match _ -> invalid_arg "match not implemented"
+  | AST.MatchSet _ -> invalid_arg "matchset not implemented"
+  | AST.If _ -> invalid_arg "if"
 
 
 (** Translate a kind of test into an expression *)
@@ -603,8 +524,8 @@ let of_test (t : AST.test) k (e : AST.exp) : exp =
     | AST.TestEmpty -> "is_empty")
   in
   match t with
-  | AST.Yes t -> App_ (f t, e)
-  | AST.No t -> App_ (Cst "not", (App_ (f t, e)))
+  | AST.Yes t -> App (f t, e)
+  | AST.No t -> App (Cst "not", (App (f t, e)))
 
 
 (** Converting cat commands instruction by instruction & recursively
@@ -625,7 +546,7 @@ let rec translate_instr k (parse_file : string -> AST.ins list) (i : AST.ins)
      [Def (Fresh "Test", None, of_test test k e, Test_definition)]
   | Test ((_, _, test, e, Some x), _) ->
      [Def (Normal x, None, of_test test k e, Test_definition)]
-  | Let (_, [(_, Pvar Some name, _)]) when List.mem name remove_defs ->
+  | Let (_, [(_, Pvar Some name, _)]) when List.mem name definitions_to_remove ->
      [Comment (sprintf "Definition of %s already included in the prelude" name)]
   | Let (_, bindings) ->
      let f : AST.binding -> _ = function
@@ -665,7 +586,7 @@ let resolve_fresh (l : name instr list) : string instr list =
   let open StringSet in
   let fv = function Normal x -> [x] | Fresh _ -> [] in
   let seen = ref (free_vars_of_instrs fv l) in
-  let fresh x = 
+  let fresh x =
     let x' = first (name_like x) (fun y -> not (mem y !seen)) in
     seen := add x' !seen;
     x'
@@ -673,7 +594,7 @@ let resolve_fresh (l : name instr list) : string instr list =
   let freshen = function Normal x -> x | Fresh x -> fresh x in
   let resolve : name instr -> string instr = function
     | Def (x, ty, e, t) -> Def (freshen x, ty, e, t)
-    | Axiom (x, e) -> Axiom (freshen x, e)
+    | Variable (x, e) -> Variable (freshen x, e)
     | Inductive defs ->
        Inductive (List.map (fun (x, n, e) -> (x, freshen n, e)) defs)
     | Withfrom (s, s', e) -> Withfrom (s, freshen s', e)
@@ -687,14 +608,14 @@ let resolve_fresh (l : name instr list) : string instr list =
 let remove_withfrom_axiom_set (l : string instr list) : string instr list =
   let add_arg e1 e2 =
     match e1 with
-    | App_ (e1, Tup e2s) -> App_(e1, Tup (e2s @ [e2]))
-    | e1 -> App_ (e1, e2)
+    | App (e1, Tup e2s) -> App (e1, Tup (e2s @ [e2]))
+    | e1 -> App (e1, e2)
   in
-  let eta_expanse x e = Fun_ ([x], add_arg e (Var_ x)) in
+  let eta_expanse x e = Fun ([x], add_arg e (Var x)) in
   let f : string instr -> string instr list = function
     | Withfrom (x, set, e) ->
-       [Axiom (set, App_(Cst "sig", eta_expanse x e));
-        Def (x, None, App_(Cst "proj1_sig", Var_ set), Normal_definition)]
+       [Variable (set, App (Cst "sig", eta_expanse x e));
+        Def (x, None, App (Cst "proj1_sig", Var set), Normal_definition)]
     | i -> [i]
   in
   List.concat (List.map f l)
@@ -703,13 +624,13 @@ let remove_withfrom_axiom_set (l : string instr list) : string instr list =
 let remove_withfrom (l : string instr list) : string instr list =
   let add_arg e1 e2 =
     match e1 with
-    | App_ (e1, Tup e2s) -> App_(e1, Tup (e2s @ [e2]))
-    | e1 -> App_ (e1, e2)
+    | App (e1, Tup e2s) -> App (e1, Tup (e2s @ [e2]))
+    | e1 -> App (e1, e2)
   in
   let collect : string instr -> string instr list = function
     | Withfrom (x, set, e) ->
-       [Axiom (x, App_ (Cst "relation", Cst "events"));
-        Def (set, None, add_arg e (Var_ x), Condition)]
+       [Variable (x, App (Cst "relation", Cst "events"));
+        Def (set, None, add_arg e (Var x), Condition)]
     | i -> [i]
   in
   List.concat (List.map collect l)
@@ -717,7 +638,7 @@ let remove_withfrom (l : string instr list) : string instr list =
 
 (** Shadowing *)
 
-let resolve_shadowing defined (instrs : string instr list) : string instr list =
+let resolve_shadowing add_info defined (instrs : string instr list) : string instr list =
   let defined = ref defined in
   let visible = free_vars_of_instrs (fun x -> [x]) instrs in
   let renaming = ref StringMap.empty in
@@ -740,7 +661,7 @@ let resolve_shadowing defined (instrs : string instr list) : string instr list =
   let sub e = subst_with_var !renaming e in
   let rename = function
     | Def (x, ty, e, t) -> let e = sub e in Def (def x, ty, e, t)
-    | Axiom (x, e) -> let e = sub e in Axiom (def x, e)
+    | Variable (x, e) -> let e = sub e in Variable (def x, e)
     | Inductive defs ->
        defs
        |> List.map (fun (x, y, e) -> (def x, def y, e))
@@ -750,7 +671,7 @@ let resolve_shadowing defined (instrs : string instr list) : string instr list =
     | Comment s          -> Comment s
   in
   let instrs = List.map rename instrs in
-  let com =
+  let () =
     !renamings
     |> StringMap.bindings
     |> List.map
@@ -759,12 +680,11 @@ let resolve_shadowing defined (instrs : string instr list) : string instr list =
              "\n  %s -> %s"
              x (String.concat ", " (List.rev xs)))
     |> function
-      | [] -> []
+      | [] -> ()
       | warnings ->
-         [Comment ("Warning: the following renamings occurred:"
-                   ^ String.concat "" warnings)]
+         add_info ("The following renamings occurred:" ^ String.concat "" warnings)
   in
-  instrs @ com
+  instrs
 
 
 (** Removing try/with *)
@@ -772,16 +692,16 @@ let resolve_shadowing defined (instrs : string instr list) : string instr list =
 let rec assert_notry =
   let f = assert_notry in
   function
-  | Var_ x          -> Var_ x
+  | Var x           -> Var x
   | Cst s           -> Cst s
-  | App_(e1, e2)    -> App_(f e1, f e2)
-  | Fun_(xs, e)     -> Fun_(xs, f e)
-  | Let_(x, e1, e2) -> Let_(x, f e1, f e2)
+  | App (e1, e2)    -> App (f e1, f e2)
+  | Fun (xs, e)     -> Fun (xs, f e)
+  | Let (x, e1, e2) -> Let (x, f e1, f e2)
   | Fix (x, xs, e)  -> Fix (x, xs, f e)
   | Tup es          -> Tup (List.map f es)
   | Op1 (o, e1)     -> Op1 (o, f e1)
   | Op2 (o, e1, e2) -> Op2 (o, f e1, f e2)
-  | Try_ _          -> failwith "nested try .. with are ambiguous"
+  | Try _           -> failwith "nested try .. with are ambiguous"
   | Annot (s, e)    -> Annot (s, f e)
 
 let remove_trywith defined : string instr list -> string instr list =
@@ -790,16 +710,16 @@ let remove_trywith defined : string instr list -> string instr list =
     let f = rmtry defined in
     let fnewdef xs = rmtry (List.fold_right add xs defined) in
     match e with
-    | Var_ x          -> Var_ x
+    | Var x           -> Var x
     | Cst s           -> Cst s
-    | App_(e1, e2)    -> App_(f e1, f e2)
-    | Fun_(xs, e)     -> Fun_(xs, fnewdef xs e)
-    | Let_(x, e1, e2) -> Let_(x, f e1, fnewdef [x] e2)
+    | App (e1, e2)    -> App (f e1, f e2)
+    | Fun (xs, e)     -> Fun (xs, fnewdef xs e)
+    | Let (x, e1, e2) -> Let (x, f e1, fnewdef [x] e2)
     | Fix (x, xs, e)  -> Fix (x, xs, fnewdef (x :: xs) e)
     | Tup es          -> Tup (List.map f es)
     | Op1 (o, e1)     -> Op1 (o, f e1)
     | Op2 (o, e1, e2) -> Op2 (o, f e1, f e2)
-    | Try_ (e1, e2)    -> let s = pprint_exp e in
+    | Try (e1, e2)    -> let s = pprint_exp 1 e in
                          if subset (free_vars e1) defined
                          then Annot ("successful: "^ s, assert_notry e1)
                          else Annot ("failed: "^ s, f e2)
@@ -811,7 +731,7 @@ let remove_trywith defined : string instr list -> string instr list =
   let def x = define x; x in
   List.map (function
       | Def (x, ty, e, t) -> let e = rmtry e in Def (def x, ty, e, t)
-      | Axiom (x, e) -> let e = rmtry e in Axiom (def x, e)
+      | Variable (x, e) -> let e = rmtry e in Variable (def x, e)
       | Inductive defs ->
          List.iter (fun (x, y, _) -> define x; define y) defs;
          Inductive (List.map (fun (x, y, e) -> (x, y, rmtry e)) defs)
@@ -847,19 +767,27 @@ let extract_from_list (f : 'a -> 'b option) : 'a list -> ('a list * 'b list) =
 let conjunction_of_exps (l : exp list) : exp =
   if l = [] then
     Cst "True"
-  else 
+  else
     fold_right1 (fun x y -> Op2 (And, x, y)) l
 
 let conjunction_of_vars (vars : string list) : exp =
-  conjunction_of_exps (List.map (fun x -> Var_ x) vars)
+  conjunction_of_exps (List.map (fun x -> Var x) vars)
 
-(** Collects tests and conditions to make the validity condition at the end *)
-(*
-* 
-* autre méthode: on met les variables on the fly, puis on les regroupe au début dans un record
-* -> ça change rien je crois, parce que les conditions ont besoin de toutes les définitions intermédiaires
-* 
-*)
+let split_on_char sep s =
+  let open String in
+  let r = ref [] in
+  let j = ref (length s) in
+  for i = length s - 1 downto 0 do
+    if unsafe_get s i = sep then begin
+      r := sub s (i + 1) (!j - i - 1) :: !r;
+      j := i
+    end
+  done;
+  sub s 0 !j :: !r
+
+
+(** Collects conditions and gather them at the end *)
+
 let collect_conditions instrs : string instr list =
   (* Get the name of all the test declared *)
   let tests =
@@ -893,6 +821,7 @@ let check_injectivity (print : 'a -> string) (f : string -> 'a) : string -> 'a =
     end;
     y
 
+
 (** Transforms chararacters '-' and '.' in identifiers and check that
    it introduces no conflict *)
 
@@ -900,22 +829,22 @@ let resolve_charset : string instr list -> string instr list =
   let fix_name = String.map (function '-' | '.' -> '_' | c -> c) in
   let fx = check_injectivity (fun s -> s) fix_name in
   let rec fe : exp -> exp = function
-  | Var_ x          -> Var_ (fx x)
+  | Var x           -> Var (fx x)
   | Cst s           -> Cst s
-  | App_(e1, e2)    -> App_(fe e1, fe e2)
-  | Fun_(xs, e)     -> Fun_(List.map fx xs, fe e)
-  | Let_(x, e1, e2) -> Let_(fx x, fe e1, fe e2)
+  | App (e1, e2)    -> App (fe e1, fe e2)
+  | Fun (xs, e)     -> Fun (List.map fx xs, fe e)
+  | Let (x, e1, e2) -> Let (fx x, fe e1, fe e2)
   | Fix (x, xs, e)  -> Fix (fx x, List.map fx xs, fe e)
   | Tup es          -> Tup (List.map fe es)
   | Op1 (o, e1)     -> Op1 (o, fe e1)
   | Op2 (o, e1, e2) -> Op2 (o, fe e1, fe e2)
-  | Try_ (e1, e2)   -> Try_ (fe e1, fe e2)
+  | Try (e1, e2)    -> Try (fe e1, fe e2)
   | Annot (s, e)    -> Annot (s, fe e)
   in
   List.map
     (function
      | Def (x, ty, e, t) -> Def (fx x, ty, fe e, t)
-     | Axiom (x, e) -> Axiom (fx x, fe e)
+     | Variable (x, e) -> Variable (fx x, fe e)
      | Inductive l ->
         Inductive (List.map (fun (x, y, e) -> (fx x, fx y, fe e)) l)
      | Withfrom (x, y, e) -> Withfrom (fx x, fx y, fe e)
@@ -945,7 +874,7 @@ let naming_information (instructions : string instr list) : naming =
   begin List.iter
     (function
      | Def (x, _, e, _) -> use e; def x
-     | Axiom (x, e) -> use e; def x
+     | Variable (x, e) -> use e; def x
      | Withfrom (x, y, e) -> use e; def x; def y
      | Comment _ -> ()
      | Inductive l ->
@@ -962,79 +891,72 @@ let naming_information (instructions : string instr list) : naming =
 
 let use_axioms = false
 
-let transform_instrs (l : name instr list) : string instr list =
+let transform_instrs force_defined (l : name instr list) : string instr list =
   let open StringSet in
   let ( ++ ) = union in
   let l = resolve_fresh l in
   let l = remove_withfrom l in
   let l = special_cases l in
   
-  let { uses; tries; _ } = naming_information l in
+  let infos = ref [] in
+  let add_info s = infos := !infos @ [s] in
   
-  (* Warning about names being tried but not defined *)
+  let { uses; tries; _ } = naming_information l in
+  let uses = of_list force_defined ++ uses in
+  
+  (* Informing user about undefined but try-with'ed names *)
   let ambiguous = elements (diff tries uses) in
   let warning =
-    ambiguous
-    |> String.concat ", "
-    |> sprintf "Warning: ambiguous set of variables {%s} only used \
-                inside try/with, before any definition, will be \
-                considered a priori not defined"
+    sprintf "The following set of variables is only used inside try/with's before
+any definition:
+  %s
+the corresponding try/with's failed. Use the option -defined
+id1,id2,... to make the corresponding ones succeed instead.
+"
+      (String.concat ", " ambiguous)
   in
-  (* if ambiguous <> [] then fprintf stderr "%s\n%!" warning; *)
-  let l = if ambiguous = [] then l else Comment warning :: l in
+  if ambiguous <> [] then add_info warning;
 
-  (* Warning about names being used but not in the prelude nor in on-demand *)
-  let prelude = of_list in_prelude in
-  let ondemand = of_list (List.map fst on_demand) in
-  let notfound = elements (diff uses (union prelude ondemand)) in
-  let warning =
-    notfound
-    |> String.concat ", "
-    |> sprintf "set of variables {%s} used but not defined in the \
-                prelude nor is providable on demand"
-  in
-  if notfound <> [] then failwith warning;
-  (* if notfound <> [] then fprintf stderr "%s\n%!" warning; *)
-  let l = if notfound = [] then l else Comment warning :: l in
-  
-  (* Handling on-demand definitions/axioms *)
-  let prelude = of_list in_prelude in
-  let ondemand = elements (inter (diff uses prelude) ondemand) in
+  (* Informing user about undefined names *)
+  let ondemand = elements (diff uses (of_list (defined_in_prelude @ candidate_fields))) in
   let warning =
     ondemand
     |> String.concat ", "
-    |> sprintf "Warning: set of variables {%s} used but not defined \
-                in the prelude, but will be be provided on demand"
+    |> sprintf "The following set of variables is used but is neither defined in the
+prelude nor provided by the candidate:
+  %s
+"
   in
-  (* if ondemand <> [] then fprintf stderr "%s\n%!" warning; *)
-  let l = if ondemand = [] then l else Comment warning :: l in
+  if ondemand <> [] then add_info warning;
+  
   let provide = if use_axioms then unknown_axiom else unknown_def in
   let ondemand_definitions = List.map provide ondemand in
   let introduced_by_translation =
     of_list ["valid"; "witness_conditions"; "witness"; "relation_conditions"] in
-  let fv = uses ++ prelude ++ of_list ondemand ++ introduced_by_translation in
+  
+  let fv = uses
+           ++ of_list candidate_fields
+           ++ of_list defined_in_prelude
+           ++ of_list ondemand
+           ++ introduced_by_translation
+  in
   
   l
-  |> resolve_shadowing fv
+  |> resolve_shadowing add_info fv
   |> collect_conditions
   |> remove_trywith fv
   |> (@) ondemand_definitions
+  |> fun l -> l @ [Comment ("Informations on the translation from cat to coq:\n\n"
+                            ^ String.concat "\n" !infos ^ "\n")]
   |> resolve_charset
 
 
-let read_file filename : string list = 
-  let lines = ref [] in
-  let chan = open_in filename in
-  try
-    while true do
-      lines := input_line chan :: !lines
-    done; assert false
-  with End_of_file ->
-    close_in chan;
-    List.rev !lines
+(** Print model in Coq syntax *)
 
 let pprint_coq_model
+      (verbosity : int)
       (keepnotations : bool)
+      (force_defined : string list)
       (prelude : string list)
       (parse_file : string -> AST.t)
       (model : AST.t) : string =
@@ -1048,20 +970,20 @@ let pprint_coq_model
   let instrs = translate_instrs keepnotations parse instrs in
   
   (* More global transformations *)
-  let instrs = transform_instrs instrs in
+  let instrs = transform_instrs force_defined instrs in
   
-  let comment s = pprint_instr (Comment s) in
+  let comment s = pprint_instr verbosity (Comment s) in
   
-  let print_instrs l = List.concat (List.map (pprint_instr) l) in
+  let print_instrs l = List.concat (List.map (pprint_instr verbosity) l) in
   
   let intro_R_W_etc =
     if use_axioms
     then axioms
-    else imports_from_execution
+    else imports_candidate_fields
   in
   
   let all_axiom_relations =
-    filter_map (function Axiom (x, _) -> Some x | _ -> None) instrs
+    filter_map (function Variable (x, _) -> Some x | _ -> None) instrs
   in
   
   let empty_witness_cond =
@@ -1075,33 +997,37 @@ let pprint_coq_model
       instrs
   in
   
-  [
-    comment (sprintf "Translation of model %s" name);
-    prelude;
-    [start_text];
-    print_instrs intro_R_W_etc;
-    [middle_definitions];
-    if keepnotations then ["Open Scope cat_scope."] else [];
-    print_instrs instrs;
-    comment (sprintf "End of translation of model %s" name);
-    [end_text empty_witness_cond empty_model_cond all_axiom_relations];
-  ]
-  |> List.concat |> String.concat "\n"
+  let groups = ref [] in
+  let add lvl element = if verbosity >= lvl then groups := element :: !groups in
+  
+  add 1 (comment (sprintf "Translation of model %s" name));
+  add 0 prelude;
+  add 0 [start_text];
+  add 0 (print_instrs intro_R_W_etc);
+  add 0 [middle_definitions];
+  add 0 (if keepnotations then ["Open Scope cat_scope."] else []);
+  add 0 (print_instrs instrs);
+  add 0 [end_text empty_witness_cond empty_model_cond all_axiom_relations];
+  add 1 (comment (sprintf "End of translation of model %s" name));
+  
+  !groups |> List.rev |> List.concat |> String.concat "\n"
 
 
 (** Read commandline options *)
 
-let includes = ref []
-let debug = ref false
-let prelude = ref true
-let notations = ref true
-let quiet = ref false
-let makefile = ref false
-let output_file = ref None
-let all = ref false
-let cat = ref true
+let allcats = ref false
 let args = ref []
+let cat = ref true
 let convertfilename = ref false
+let debug = ref false
+let force_defined = ref []
+let includes = ref []
+let makefile = ref false
+let notations = ref true
+let output_file = ref None
+let prelude = ref true
+let quiet = ref false
+let verbosity = ref 1
 
 let prog =
   if Array.length Sys.argv > 0 then
@@ -1111,75 +1037,112 @@ let prog =
 let forbidden_chars = "-.+"
 
 let usage =
-  sprintf
-    "Usage: %s [options]* <file.cat> [<file.cat>]*
-     Translate .cat files into .v files, and create a Cat.v file
-     containing basic definitions, including the one of execution.
-"
-    prog
+  let s =
+    (sprintf
+       "Usage: %s [options]* <file.cat> [<file.cat>]*\n
+        Translate .cat files into .v files, and create a Cat.v file
+        containing basic definitions, including the one of candidate.\n"
+       prog)
+  in s (* keep this let for indentation *)
+
+let options =
+  [
+    ("-allcats",
+     Arg.Unit (fun () -> makefile := true; allcats := true),
+     sprintf
+       "
+        add all the cats in herd's libdir's directory to the list of
+        input files. Also turn on the -makefile option.  Use:
+        %s -allcats && make -j7
+        to check everything.\n"
+       ("  " ^ prog))
+  ;
+    ("-convertfilename",
+     Arg.Unit (fun () -> convertfilename := true),
+     sprintf
+       "
+        do not read any file, simply display the filename converted
+        to a coq-compatible filename (characters in \"%s\" are mapped
+        to '_'). Note that the filenames are in the current directory,
+        which may differ from the cat file(s) directory.\n"
+       (String.escaped forbidden_chars)
+    )
+  ;
+    ("-debug",
+     Arg.Unit (fun () -> debug := true),
+     sprintf
+       "
+        display which files are opened\n")
+  ;
+    ("-defined",
+     Arg.String (fun s -> force_defined := split_on_char ',' s),
+     sprintf
+       "<ident1>[,<ident2>[,...]]
+        make try..with succeed for these
+        identifiers, even if they don't appear outside a try..with\n")
+  ;
+    ("-I",
+     Arg.String (fun s -> includes := !includes @ [s]),
+     sprintf
+       "<dir>
+        add <dir> to search path\n")
+  ;
+    ("-makefile",
+     Arg.Unit (fun () -> makefile := true),
+     sprintf
+       "
+        generate a Makefile for all the .v files generated, including
+        Cat.v, and a file importeverything.v that check that all the
+        validity conditions are defined.\n")
+  ;
+    ("-nocat",
+     Arg.Unit (fun () -> cat := false),
+     sprintf
+       "
+        do not write Cat.v\n")
+  ;
+    ("-nonotations",
+     Arg.Unit (fun () -> notations := false),
+     sprintf
+       "
+        do not keep notations, uses regular identifiers instead\n")
+  ;
+    ("-noprelude",
+     Arg.Unit (fun () -> prelude := false),
+     sprintf
+       "
+        do not include any prelude\n")
+  ;
+    ("-o",
+     Arg.String (fun s -> output_file := Some s),
+     sprintf
+       "<filename>
+        generated file name, - for standard output. The default is a
+        coq-compatible name generated from the input filename. If this
+        option is provided, only one file can be handled at a time.\n")
+  ;
+    ("-q",
+     Arg.Unit (fun () -> quiet := true),
+     sprintf
+       "
+        quiet: read and parse files but do not write anything\n"
+    )
+  ;
+    ("-v",
+     Arg.Int (fun n -> verbosity := n),
+     sprintf
+       "<integer>
+        verbosity level: more or less annotations in generated files.
+        For now, can be either 0 and 1 (default 1)\n"
+    )
+  ]
 
 let () =
-  (fun options ->
-    Arg.parse
-      options
-      (fun s -> args := s :: !args)
-      usage)
-    [
-      ("-I",
-       Arg.String (fun s -> includes := !includes @ [s]),
-       "<dir>  add <dir> to search path")
-    ;
-      ("-debug",
-       Arg.Unit (fun () -> debug := true),
-       " display which files are opened")
-    ;
-      ("-allcats",
-       Arg.Unit (fun () -> makefile := true; all := true),
-       " add all the cats in herd's libdir's directory to the list of 
-        input files. Also turn on the -makefile option.  Use
-           "^prog^" -allcats && make -j7
-        to check everything.")
-    ;
-      ("-makefile",
-       Arg.Unit (fun () -> makefile := true),
-       " generate a Makefile for all the .v files generated, including
-        Cat.v, and a file importeverything.v that check that all the
-        validity conditions are defined.")
-    ;
-      ("-nocat",
-       Arg.Unit (fun () -> cat := false),
-       " do not write Cat.v")
-    ;
-      ("-nonotations",
-       Arg.Unit (fun () -> notations := false),
-       " do not keep notations, uses regular identifiers instead")
-    ;
-      ("-noprelude",
-       Arg.Unit (fun () -> prelude := false),
-       " do not include any prelude")
-    ;
-      ("-convertfilename",
-       Arg.Unit (fun () -> convertfilename := true),
-       sprintf
-         " do not read any file, simply display the filename converted
-          to a coq-compatible filename (characters in \"%s\" are mapped
-          to '_'). Note that the filenames are in the current directory,
-          which may differ from the cat file(s) directory."
-         (String.escaped forbidden_chars)
-      )
-    ;
-      ("-q",
-       Arg.Unit (fun () -> quiet := true),
-       " quiet: read and parse files but do not write anything"
-      )
-    ;
-      ("-o",
-       Arg.String (fun s -> output_file := Some s),
-       "<filename>  generated file name, - for standard output. The
-        default is a coq-compatible name generated from the input
-        filename. If this option is provided, only one file can be
-        handled at a time.")
-    ]
+  Arg.parse
+    options
+    (fun s -> args := s :: !args)
+    usage
+
 
 let libfind =
   let module ML =
@@ -1214,7 +1177,9 @@ let vfilename fname = normalize_filename fname ^ ".v"
 let handle_filename fname prelude outchannel =
   let text =
     pprint_coq_model
+      !verbosity
       !notations
+      !force_defined
       prelude
       Parser.parse
       (Parser.parse fname)
@@ -1223,6 +1188,17 @@ let handle_filename fname prelude outchannel =
   | None -> ()
   | Some outchannel -> fprintf outchannel "%s\n" text
 
+
+let read_file filename : string list =
+  let lines = ref [] in
+  let chan = open_in filename in
+  try
+    while true do
+      lines := input_line chan :: !lines
+    done; assert false
+  with End_of_file ->
+    close_in chan;
+    List.rev !lines
 
 exception Return
 let return () : unit = raise Return
@@ -1237,14 +1213,14 @@ let () =
       |> printf "%s\n"
       |> return;
 
-    if !all then
+    if !allcats then
       args :=
         !args @
           List.map (fun x -> x ^ ".cat")
           ["aarch64"; "aarch64fences"; "aarch64-obsolete"; "arm-alt"; "arm";
            "armfences"; "armllh"; "atom-arm"; "atom"; "c11_base"; "c11_cos";
            "c11_los"; "c11_orig"; "c11_partialSC"; "c11_simp"; "compat";
-           "cos"; "coscat"; "cosllh"; "cos-opt"; "cross"; "doc64"; "fences";
+           "cos"; "coscat"; (* "cosllh"; "cos-opt"; *) "cross"; "doc64"; "fences";
            "filters"; "fulleieio"; "herd"; "herdcat"; "lessrelaxed"; "LL";
            "mini"; "minimal"; "minimalcat"; "mips"; "mipsfences";
            "mips-tso"; "naked"; "ppc"; "ppc-checks"; "ppcfences"; "ppo";
