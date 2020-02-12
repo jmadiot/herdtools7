@@ -86,7 +86,7 @@ Delimit Scope cat_scope with cat.
 Infix "∪" := union        (at level 70, right associativity) : cat_scope.
 Infix "++":= add_element  (at level 60, right associativity) : cat_scope.
 Infix ";;" := rel_seq     (at level 55, right associativity) : cat_scope.
-Infix "&" := intersection (at level 51, right associativity) : cat_scope.
+Infix "∩" := intersection (at level 51, right associativity) : cat_scope.
 Infix "\" := diff         (at level 45, left associativity)  : cat_scope.
 Infix "*" := cartesian    (at level 40, left associativity)  : cat_scope.
 

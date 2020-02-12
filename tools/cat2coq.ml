@@ -18,7 +18,7 @@ let pprint_op2 = function
   | Union -> "∪"
   | Cons -> "++"
   | Seq -> ";;"
-  | Inter -> "&"
+  | Inter -> "∩"
   | Sub -> "\\"
   | Cartes -> "*"
   | Cast -> ":"
@@ -277,7 +277,7 @@ let sets_from_execution =
 let relations_from_execution =
   ["rf"; "po"; "int"; "ext"; "loc"; "addr"; "data"; "ctrl"; "amo"]
 
-let imports_from_execution =
+let imports_from_execution : string instr list =
   List.map
     (fun x -> Def (x, None, App_ (Cst x, Cst "c"), Normal_definition))
     (sets_from_execution
@@ -294,6 +294,9 @@ let axioms =
       (fun x -> Axiom (x, App_ (Cst "relation", Cst "events")))
       relations_from_execution
 
+
+(** Before generated code *)
+
 let start_text = "\
 Section Model.
 
@@ -305,6 +308,9 @@ Instance SetLike_set_events : SetLike (set events) := SetLike_set events.
 Instance SetLike_relation_events : SetLike (relation events) := SetLike_relation events.
 "
 
+
+(** After generated imports from candidate *)
+
 let middle_definitions = "\
 Definition M := union R W.
 Definition emptyset : set events := empty.
@@ -312,7 +318,29 @@ Definition classes_loc (S : set events) : set (set events) :=
   fun Si => forall x y, Si x -> Si y -> loc x y.
 "
 
-let end_text = "End Model.\n"
+
+(** After generated code *)
+
+let end_text empty_witness_cond empty_model_cond relations =
+  sprintf
+"End Model.
+
+Record witness (c : candidate) :=
+  {
+    %sconditions: %s%s
+  }.
+
+Definition valid := fun (c : candidate) (w : witness c) => %s.
+"
+  (String.concat "" (List.map (sprintf "%s : relation (events c);\n    ") relations))
+  (if empty_witness_cond then "True" else "witness_conditions c ")
+  (String.concat " " relations)
+  (if empty_model_cond then
+     "True"
+   else
+     sprintf
+       "model_conditions c %s"
+       (String.concat " " (List.map (sprintf "(%s c w)") relations)))
 
 
 (** Definitions that are in the prelude but can be shadowed *)
@@ -816,39 +844,38 @@ let extract_from_list (f : 'a -> 'b option) : 'a list -> ('a list * 'b list) =
        | Some b -> extr al (b :: bl) l
   in extr [] []
 
+let conjunction_of_exps (l : exp list) : exp =
+  if l = [] then
+    Cst "True"
+  else 
+    fold_right1 (fun x y -> Op2 (And, x, y)) l
+
+let conjunction_of_vars (vars : string list) : exp =
+  conjunction_of_exps (List.map (fun x -> Var_ x) vars)
 
 (** Collects tests and conditions to make the validity condition at the end *)
-
-let collect_tests instrs : string instr list =
-  (* [Def ("valid", None, Cst "(\* TBD *\)", false)]; *)
-  let instrs =
-    match instrs with
-    | Def ("valid", _, _, _) :: l -> l
-    | _ -> failwith "internal error - first instruction was not added"
-  in
-  let testnames =
+(*
+* 
+* autre méthode: on met les variables on the fly, puis on les regroupe au début dans un record
+* -> ça change rien je crois, parce que les conditions ont besoin de toutes les définitions intermédiaires
+* 
+*)
+let collect_conditions instrs : string instr list =
+  (* Get the name of all the test declared *)
+  let tests =
     filter_map
       (function Def (x, _, _, Test_definition) -> Some x | _ -> None)
       instrs
   in
-  let alltests =
-    match testnames with
-    | [] -> Annot ("No tests found", Cst "True")
-    | _ -> fold_right1
-             (fun x y -> Op2 (And, x, y))
-             (List.map (fun x -> Var_ x) testnames)
-  in
-  let instrs, conds =
+  (* Extract the conditions on withfroms *)
+  let (instrs, conditions) =
     extract_from_list
       (function Def (_, _, e, Condition) -> Some e | _ -> None)
       instrs
   in
-  let addconditions =
-    List.fold_right
-      (fun cond p -> Op2 (Arr, cond, p))
-      conds
-  in
-  instrs @ [Def ("valid", Some "Prop", addconditions alltests, Test_definition)]
+  instrs @
+    [Def ("witness_conditions", None, conjunction_of_exps conditions, Normal_definition);
+     Def ("model_conditions", None, conjunction_of_vars tests, Normal_definition) ]
 
 
 (** Behaves as [f] but checks injectivity where it is called *)
@@ -937,6 +964,7 @@ let use_axioms = false
 
 let transform_instrs (l : name instr list) : string instr list =
   let open StringSet in
+  let ( ++ ) = union in
   let l = resolve_fresh l in
   let l = remove_withfrom l in
   let l = special_cases l in
@@ -982,13 +1010,14 @@ let transform_instrs (l : name instr list) : string instr list =
   let l = if ondemand = [] then l else Comment warning :: l in
   let provide = if use_axioms then unknown_axiom else unknown_def in
   let ondemand_definitions = List.map provide ondemand in
+  let introduced_by_translation =
+    of_list ["valid"; "witness_conditions"; "witness"; "relation_conditions"] in
+  let fv = uses ++ prelude ++ of_list ondemand ++ introduced_by_translation in
   
-  let defined_before = union uses (union prelude (of_list ondemand))  in
   l
-  |> (@) [Def ("valid", None, Cst "(* TBD *)", Test_definition)]
-  |> resolve_shadowing defined_before
-  |> collect_tests
-  |> remove_trywith defined_before
+  |> resolve_shadowing fv
+  |> collect_conditions
+  |> remove_trywith fv
   |> (@) ondemand_definitions
   |> resolve_charset
 
@@ -1031,6 +1060,21 @@ let pprint_coq_model
     else imports_from_execution
   in
   
+  let all_axiom_relations =
+    filter_map (function Axiom (x, _) -> Some x | _ -> None) instrs
+  in
+  
+  let empty_witness_cond =
+    List.mem
+      (Def ("witness_conditions", None, Cst "True", Normal_definition))
+      instrs
+  in
+  let empty_model_cond =
+    List.mem
+      (Def ("model_conditions", None, Cst "True", Normal_definition))
+      instrs
+  in
+  
   [
     comment (sprintf "Translation of model %s" name);
     prelude;
@@ -1040,7 +1084,7 @@ let pprint_coq_model
     if keepnotations then ["Open Scope cat_scope."] else [];
     print_instrs instrs;
     comment (sprintf "End of translation of model %s" name);
-    [end_text];
+    [end_text empty_witness_cond empty_model_cond all_axiom_relations];
   ]
   |> List.concat |> String.concat "\n"
 
