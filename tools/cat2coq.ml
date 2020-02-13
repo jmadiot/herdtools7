@@ -1025,6 +1025,7 @@ let includes = ref []
 let makefile = ref false
 let notations = ref true
 let output_file = ref None
+let overwrite = ref false
 let prelude = ref true
 let quiet = ref false
 let verbosity = ref 1
@@ -1115,6 +1116,14 @@ let options =
   ;
     ("-o",
      Arg.String (fun s -> output_file := Some s),
+     sprintf
+       "<filename>
+        generated file name, - for standard output. The default is a
+        coq-compatible name generated from the input filename. If this
+        option is provided, only one file can be handled at a time.\n")
+  ;
+    ("-overwrite",
+     Arg.Unit (fun () -> overwrite := true),
      sprintf
        "<filename>
         generated file name, - for standard output. The default is a
@@ -1235,10 +1244,19 @@ let () =
 
     let pre = if !prelude then read_file (libfind "prelude_cat2coq.v") else [] in
     
+    let careful_open_out filename =
+      if !overwrite || not (Sys.file_exists filename) then
+        open_out filename
+      else
+        failwith (sprintf "File '%s' already exists. Use option \
+                           -overwrite to ignore existing files."
+                    filename)
+    in
+    
     (* Output Cat.v file *)
     let () =
       if !cat && !prelude then
-        let o = open_out "Cat.v" in
+        let o = careful_open_out "Cat.v" in
         List.iter (fprintf o "%s\n") pre
     in
     
@@ -1246,9 +1264,9 @@ let () =
     let import = ["From Coq Require Import Relations String.";
                   "Require Import Cat."] in
     
-    match !args, !quiet, !output_file with
+    begin match !args, !quiet, !output_file with
     | [fname], false, Some "-" -> handle_filename (trace fname) import (Some stdout)
-    | [fname], false, Some outfile -> handle_filename (trace fname) import (Some (open_out outfile))
+    | [fname], false, Some outfile -> handle_filename (trace fname) import (Some (careful_open_out outfile))
     | [fname], true, None -> handle_filename (trace fname) import None
     | _, true, Some _ -> failwith "options -o and -q are incompatible"
     | _, false, Some _ -> failwith "exactly one input file must be specified \
@@ -1257,7 +1275,7 @@ let () =
        List.iter
          (fun fname ->
            handle_filename (trace fname) import
-             (if !quiet then None else Some (open_out (vfilename fname))))
+             (if !quiet then None else Some (careful_open_out (vfilename fname))))
          fnames;
 
     if !makefile then begin
@@ -1265,13 +1283,13 @@ let () =
         let files = List.map normalize_filename fnames in
         let v l = String.concat " " (List.map (fun x -> x ^ ".v") l) in
         
-        let o = open_out "importeverything.v" in
+        let o = careful_open_out "importeverything.v" in
         fprintf o "Require Import Cat Relations.\n";
         fprintf o "Require %s.\n\n" (String.concat " " files);
         List.iter (fprintf o "Check %s.valid.\n") files;
         close_out o;
         
-        let o = open_out "Makefile" in
+        let o = careful_open_out "Makefile" in
         fprintf o "
 cat_vs=%s
 
@@ -1290,6 +1308,7 @@ clean:
 "
           (v files);
       end;
+    end
     
   with
   | Misc.Fatal errmsg
