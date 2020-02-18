@@ -1,5 +1,45 @@
 open Printf
 
+(** Functions on lists *)
+
+let rec filter_map (f : 'a -> 'b option) : 'a list -> 'b list =
+  function
+  | [] -> []
+  | a :: l ->
+     match f a with
+     | None -> filter_map f l
+     | Some b -> b :: filter_map f l
+
+let rec fold_right1 (f : 'a -> 'a -> 'a) : 'a list -> 'a =
+  function
+  | [] -> invalid_arg "fold_right1"
+  | [x] -> x
+  | x :: xs -> f x (fold_right1 f xs)
+
+let extract_from_list (f : 'a -> 'b option) : 'a list -> ('a list * 'b list) =
+  let rec extr al bl = function
+    | [] -> (List.rev al, List.rev bl)
+    | a :: l ->
+       match f a with
+       | None -> extr (a :: al) bl l
+       | Some b -> extr al (b :: bl) l
+  in extr [] []
+
+let split_on_char sep s =
+  let open String in
+  let r = ref [] in
+  let j = ref (length s) in
+  for i = length s - 1 downto 0 do
+    if unsafe_get s i = sep then begin
+      r := sub s (i + 1) (!j - i - 1) :: !r;
+      j := i
+    end
+  done;
+  sub s 0 !j :: !r
+
+let assoc_inv : 'b -> ('a * 'b) list -> 'a =
+  fun b l -> List.assoc b (List.map (fun (a, b) -> (b, a)) l)
+
 (** Coq-encodable expressions + try/with *)
 
 type notation = Non | Cat | Kat (* | Atbr *)
@@ -237,10 +277,11 @@ type definition_kind = Normal_definition | Test_definition | Condition
 
 type 'name instr =
   | Def of 'name * string option (* possible type annotation*) * exp * definition_kind
-  | Variable of 'name * exp
+  | Variable of 'name * exp (* section variable *)
   | Inductive of (string * 'name * exp) list
   | Withfrom of string * 'name * exp
   | Comment of string
+  | Command of string
 
 type name = Fresh of string | Normal of string
 
@@ -258,6 +299,7 @@ let free_vars_of_instr (fv: 'a -> string list) : 'a instr -> StringSet.t =
      unions (List.map (fun (x, y, e) -> [x] + (fv y + free_vars e)) defs)
   | Withfrom (x, y, e) -> [x] + (fv y + free_vars e)
   | Comment _ -> empty
+  | Command _ -> empty
 
 let free_vars_of_instrs (fv: 'a -> string list) (l : 'a instr list) =
   StringSet.unions (List.map (free_vars_of_instr fv) l)
@@ -287,29 +329,49 @@ let axioms =
 
 (** Before generated code *)
 
-let start_text = "
-Variable c : candidate.
-Definition events := events c.
+let name_of_candidate = "c"
 
-Instance SetLike_set_events : SetLike (set events) := SetLike_set events.
-Instance SetLike_relation_events : SetLike (relation events) := SetLike_relation events.
-"
+let start_definitions =
+  [
+    Variable (name_of_candidate, Cst "candidate");
+    Def ("events", None, App (Cst "events", Cst "c"), Normal_definition);
+    Command "Instance SetLike_set_events : SetLike (set events) := SetLike_set events.";
+    Command "Instance SetLike_relation_events : SetLike (relation events) := SetLike_relation events."
+  ]
 
 
 (** After generated imports from candidate *)
 
-let middle_definitions = "\
-Definition M := union R W.
-Definition emptyset : set events := empty.
-Definition classes_loc (S : set events) : set (set events) :=
-  fun Si => forall x y, Si x -> Si y -> loc x y.
-"
+let middle_definitions =
+  [
+    Def ("M", None, Op2 (Union, Var "R", Var "W"), Normal_definition);
+    Def ("emptyset", Some "set events", Cst "empty", Normal_definition);
+    Def ("classes_loc", Some "set events -> set (set events)",
+         Cst "fun S Si => forall x y, Si x -> Si y -> loc x y",
+         Normal_definition)
+        (* TODO FIX classes_loc which is obv. wrong *)
+  ]
 
 
 (** After generated code *)
 
-let end_text empty_witness_cond empty_model_cond relations =
-  let relations = String.concat " " relations in
+let end_text instrs =
+  let all_axiom_relations =
+    filter_map (function Variable (x, _) -> Some x | _ -> None) instrs
+    |> List.filter ((<>) name_of_candidate)
+  in
+  let empty_witness_cond =
+    List.mem
+      (Def ("witness_conditions", None, Cst "True", Normal_definition))
+      instrs
+  in
+  let empty_model_cond =
+    List.mem
+      (Def ("model_conditions", None, Cst "True", Normal_definition))
+      instrs
+  in
+
+  let relations = String.concat " " all_axiom_relations in
   sprintf
 "
 Definition valid (c : candidate) := %s%s.
@@ -319,6 +381,7 @@ Definition valid (c : candidate) := %s%s.
     witness_conditions c %s /\\
     " relations relations)
   (if empty_model_cond then "True" else sprintf "model_conditions c %s" relations)
+
 
 
 (** Definitions that are too complex to translate, so we remove them
@@ -381,6 +444,7 @@ let pprint_instr verbosity (i : string instr) : string list =
      [indent ^
        match i with
        | Comment s -> sprintf "(* %s *)" s
+       | Command s -> s
        | Def (x, ty, Fun (xs, e), _) ->
           sprintf "Definition %s %s %s:= %s."
             x (String.concat " " xs) (opt ty) (pprint_exp e)
@@ -519,8 +583,7 @@ let of_test (t : AST.test) k (e : AST.exp) : exp =
   | AST.No t -> App (Cst "not", (App (f t, e)))
 
 
-(** Converting cat commands instruction by instruction & recursively
-   import files *)
+(** Expand includes *)
 
 let rec expand_include parse_file is =
   let expand_one = function
@@ -529,8 +592,11 @@ let rec expand_include parse_file is =
   in
   List.(concat @@ map expand_one is)
 
+
+(** Remove unused definitions (lib/AST's syntax)*)
+
 let filter_unused_defs instrs =
-  let test_exps = List.filter_map
+  let test_exps = filter_map
                 (function AST.Test ((_, _, _, e, _), _) -> Some e | _ -> None)
                 instrs
   in
@@ -553,6 +619,33 @@ let filter_unused_defs instrs =
     | _ -> true
   in List.rev @@ List.filter filter (List.rev instrs)
 
+
+(** Remove unused definitions (this file's syntax)*)
+
+let remove_unused ~(keepalive : string list) (is : string instr list) : string instr list =
+  let open StringSet in
+  let ( + ) = union in
+  let rec clean keep = function
+    | [] -> []
+    (* Remove commands defining x when we do not need to keep x *)
+    | ( Withfrom (x, _, _) | Variable (x, _) | Def (x, _, _, _)) :: is
+         when not (mem x keep)
+      -> clean keep is
+    | Inductive defs :: is
+         when List.for_all (function (x, _, _) -> not (mem x keep)) defs
+      -> clean keep is
+    (* Otherwise, we keep and add free variables to the set [keep] *)
+    | (Withfrom (_, _, e) | Variable (_, e) as i) :: is -> i :: clean (free_vars e + keep) is
+    | (Def (_, _, e, _) as i) :: is -> i :: clean (free_vars e + keep) is
+    | (Inductive defs as i) :: is ->
+       i :: clean (List.fold_left (+) keep (List.map (function (_, _, e) -> free_vars e) defs)) is
+    | (Comment _ | Command _) as i :: is -> i :: clean keep is
+  in
+  List.rev (clean (of_list keepalive) (List.rev is))
+
+
+(** Simple translation: cat instruction -> ~coq instruction *)
+
 let rec translate_instr notation (i : AST.ins)
   : name instr list =
   let invalid_arg s = invalid_arg ("of_instr: " ^ s) in
@@ -560,7 +653,7 @@ let rec translate_instr notation (i : AST.ins)
   match i with
   | Include (_, _) -> failwith "Include should have been expanded already"
   | Test ((_, _, test, e, None), _) ->
-     [Def (Fresh "Test", None, of_test test notation e, Test_definition)]
+     [Def (Fresh "test", None, of_test test notation e, Test_definition)]
   | Test ((_, _, test, e, Some x), _) ->
      [Def (Normal x, None, of_test test notation e, Test_definition)]
   | Let (_, [(_, Pvar Some name, _)]) when List.mem name definitions_to_remove ->
@@ -592,9 +685,6 @@ let rec translate_instr notation (i : AST.ins)
   | Debug     _ -> invalid_arg "Debug"
   | Events    _ -> invalid_arg "Events"
 
-let translate_instrs notation instrs =
-  List.concat (List.map (translate_instr notation) instrs)
-
 
 (** Transform a list of instructions with Fresh-marked names to
    instructions with normal string names *)
@@ -616,6 +706,7 @@ let resolve_fresh (l : name instr list) : string instr list =
        Inductive (List.map (fun (x, n, e) -> (x, freshen n, e)) defs)
     | Withfrom (s, s', e) -> Withfrom (s, freshen s', e)
     | Comment s -> Comment s
+    | Command s -> Command s
   in
   List.map resolve l
 
@@ -686,6 +777,7 @@ let resolve_shadowing add_info defined (instrs : string instr list) : string ins
        |> fun d -> Inductive d
     | Withfrom (x, y, e) -> let e = sub e in Withfrom (def x, def y, e)
     | Comment s          -> Comment s
+    | Command s          -> Command s
   in
   let instrs = List.map rename instrs in
   let () =
@@ -753,48 +845,9 @@ let remove_trywith defined : string instr list -> string instr list =
          List.iter (fun (x, y, _) -> define x; define y) defs;
          Inductive (List.map (fun (x, y, e) -> (x, y, rmtry e)) defs)
       | Withfrom (x, y, e)    -> let e = rmtry e in Withfrom (def x, def y, e)
-      | Comment s -> Comment s)
+      | Comment s -> Comment s
+      | Command s -> Command s)
 
-
-(** Functions on lists *)
-
-let rec filter_map (f : 'a -> 'b option) : 'a list -> 'b list =
-  function
-  | [] -> []
-  | a :: l ->
-     match f a with
-     | None -> filter_map f l
-     | Some b -> b :: filter_map f l
-
-let rec fold_right1 (f : 'a -> 'a -> 'a) : 'a list -> 'a =
-  function
-  | [] -> invalid_arg "fold_right1"
-  | [x] -> x
-  | x :: xs -> f x (fold_right1 f xs)
-
-let extract_from_list (f : 'a -> 'b option) : 'a list -> ('a list * 'b list) =
-  let rec extr al bl = function
-    | [] -> (List.rev al, List.rev bl)
-    | a :: l ->
-       match f a with
-       | None -> extr (a :: al) bl l
-       | Some b -> extr al (b :: bl) l
-  in extr [] []
-
-let split_on_char sep s =
-  let open String in
-  let r = ref [] in
-  let j = ref (length s) in
-  for i = length s - 1 downto 0 do
-    if unsafe_get s i = sep then begin
-      r := sub s (i + 1) (!j - i - 1) :: !r;
-      j := i
-    end
-  done;
-  sub s 0 !j :: !r
-
-let assoc_inv : 'b -> ('a * 'b) list -> 'a =
-  fun b l -> List.assoc b (List.map (fun (a, b) -> (b, a)) l)
 
 (** Collects conditions and gather them at the end *)
 
@@ -867,7 +920,8 @@ let resolve_charset : string instr list -> string instr list =
      | Inductive l ->
         Inductive (List.map (fun (x, y, e) -> (fx x, fx y, fe e)) l)
      | Withfrom (x, y, e) -> Withfrom (fx x, fx y, fe e)
-     | Comment s -> Comment s)
+     | Comment s -> Comment s
+     | Command s -> Command s)
 
 
 (** Get information on which names are defined, used before any
@@ -895,7 +949,7 @@ let naming_information (instructions : string instr list) : naming =
      | Def (x, _, e, _) -> use e; def x
      | Variable (x, e) -> use e; def x
      | Withfrom (x, y, e) -> use e; def x; def y
-     | Comment _ -> ()
+     | Comment _ | Command _ -> ()
      | Inductive l ->
         List.iter (fun (x, y, _) -> def x; def y) l;
         List.iter (fun (_, _, e) -> use e) l)
@@ -981,64 +1035,66 @@ let pprint_coq_model
       (model : AST.t) : string =
   let parse fname = let (_, _, i) = parse_file fname in i in
   let (_, name, instrs) = model in
-  
-  (* We automatically include stdlib.cat *)
-  let instrs = AST.Include (TxtLoc.none, "stdlib.cat") :: instrs in
-
-  let instrs : string instr list =
-    instrs
-    |> expand_include parse
-    |> filter_unused_defs
-    |> translate_instrs notation
-    |> transform_instrs force_defined
-  in
-  
-  let comment s = pprint_instr verbosity (Comment s) in
-  
-  let print_instrs l = List.concat (List.map (pprint_instr verbosity) l) in
-  
   let intro_R_W_etc =
     if use_axioms
     then axioms
     else imports_candidate_fields
   in
+  let verb lvl x = if verbosity >= lvl then x else [] in
   
-  let all_axiom_relations =
-    filter_map (function Variable (x, _) -> Some x | _ -> None) instrs
-  in
-  
-  let all_definitions =
-    filter_map (function Def (x, _, _, _) -> Some x | _ -> None) instrs
-  in
+  instrs
 
-  let empty_witness_cond =
-    List.mem
-      (Def ("witness_conditions", None, Cst "True", Normal_definition))
-      instrs
-  in
-  let empty_model_cond =
-    List.mem
-      (Def ("model_conditions", None, Cst "True", Normal_definition))
-      instrs
-  in
+  (* We include stdlib.cat *)
+  |> (fun is -> AST.Include (TxtLoc.none, "stdlib.cat") :: is)
 
-  let groups = ref [] in
-  let add lvl element = if verbosity >= lvl then groups := element :: !groups in
+  (* Including includes *)
+  |> expand_include parse
+
+  (* Remove unused definitions (at herd's syntax level) *)
+  |> filter_unused_defs
+
+  (* Simple line-by-line translation *)
+  |> List.map (translate_instr notation) |> List.concat
+
+  (* Core transformations *)
+  (* TODO: maybe -- but only maybe -- some of those transformations
+     would benefit from being done after elimination of unused *)
+  |> transform_instrs force_defined
   
-  add 1 (comment (sprintf "Translation of model %s" name));
-  add 0 prelude;
-  add 0 ["Section Model."];
-  add 0 [start_text];
-  add 0 (print_instrs intro_R_W_etc);
-  add 0 [middle_definitions];
-  add 0 (if notation = Cat then ["Open Scope cat_scope."] else []);
-  add 0 (print_instrs instrs);
-  add 0 ["End Model."];
-  add 0 [sprintf "\nHint Unfold %s : cat." (String.concat " " all_definitions)];
-  add 0 [end_text empty_witness_cond empty_model_cond all_axiom_relations];
-  add 1 (comment (sprintf "End of translation of model %s" name));
-  
-  !groups |> List.rev |> List.concat |> String.concat "\n"
+  (* Adding context: prelude, section, section definitions *)
+  |> (fun instrs ->
+    [
+      (List.map (fun s -> Command s) prelude);
+      [Command "Section Model."];
+      (if notation = Cat then [Command "Open Scope cat_scope."] else []);
+      start_definitions;
+      intro_R_W_etc;
+      middle_definitions;
+      instrs;
+      [Command "End Model."];
+    ] |> List.concat)
+
+  (* Remove unused definitions *)
+  |> remove_unused ~keepalive:["events"; "witness_conditions"; "model_conditions"]
+
+  (* Adding unfold hints *)
+  |> (fun instrs ->
+    let defined = filter_map (function Def (x, _, _, _) -> Some x | _ -> None) instrs in
+    instrs @ verb 0 [Command (sprintf "\nHint Unfold %s : cat." (String.concat " " defined))])
+
+  (* Add the definition of valid *)
+  |> (fun is -> is @ [Command (end_text is)])
+
+  (* Wrap up in comments *)
+  |> (fun instrs ->
+    verb 1 [Comment ("Translation of model " ^ name)] @
+      instrs @
+        verb 1 [Comment ("End of translation of model " ^ name)])
+
+  (* Convert to a string *)
+  |> List.map (pprint_instr verbosity)
+  |> List.concat
+  |> String.concat "\n"
 
 
 (** Read commandline options *)
