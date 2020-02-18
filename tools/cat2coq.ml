@@ -523,6 +523,39 @@ let of_test (t : AST.test) k (e : AST.exp) : exp =
 (** Converting cat commands instruction by instruction & recursively
    import files *)
 
+let expand_include parse_file is =
+  let expand_one = function
+    | AST.Include (_, filename) -> parse_file filename
+    | x -> [x]
+  in
+  List.(concat @@ map expand_one is)
+
+let filter_unused_defs instrs =
+  let test_exps = List.filter_map
+                (function AST.Test ((_, _, _, e, _), _) -> Some e | _ -> None)
+                instrs
+  in
+  let concat = List.fold_left StringSet.union StringSet.empty in
+  let vars_of_exps list = concat @@ List.map (ASTUtils.free_body []) list in
+  let needed = ref (vars_of_exps test_exps) in
+  let filter = function
+    | AST.Let (_, list)
+    | AST.Rec (_, list, _) ->
+      let pats = List.concat @@ List.map (fun (_, x, _) -> vars_of_pat x) list in
+       if List.exists (fun s -> StringSet.mem s !needed) pats then begin
+          let exps = List.map (fun (_, _, e) -> e) list in
+          needed := StringSet.union !needed (vars_of_exps exps);
+          true
+         end
+       else false
+    | AST.WithFrom (_, _, exp) ->
+       needed := StringSet.union !needed (vars_of_exps [exp]);
+       true
+    | _ -> true
+  in List.rev @@ List.filter filter (List.rev instrs)
+
+let preprocess parse_file is = filter_unused_defs @@ expand_include parse_file is
+
 let rec translate_instr notation (parse_file : string -> AST.ins list) (i : AST.ins)
   : name instr list =
   let invalid_arg s = invalid_arg ("of_instr: " ^ s) in
