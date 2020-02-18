@@ -311,25 +311,14 @@ Definition classes_loc (S : set events) : set (set events) :=
 (** After generated code *)
 
 let end_text empty_witness_cond empty_model_cond relations =
+  let relations = String.concat " " relations in
   sprintf
 "End Model.
 
-Record witness (c : candidate) :=
-  {
-    %sconditions: %s%s
-  }.
-
-Definition valid := fun (c : candidate) (w : witness c) => %s.
+Definition valid (c : candidate) := %s%s.
 "
-  (String.concat "" (List.map (sprintf "%s : relation (events c);\n    ") relations))
-  (if empty_witness_cond then "True" else "witness_conditions c ")
-  (String.concat " " relations)
-  (if empty_model_cond then
-     "True"
-   else
-     sprintf
-       "model_conditions c %s"
-       (String.concat " " (List.map (sprintf "(%s c w)") relations)))
+  (if empty_witness_cond then "" else sprintf "exists %s : relation (events c), witness_conditions c %s /\\ " relations relations)
+  (if empty_model_cond then "True" else sprintf "model_conditions c %s" relations)
 
 
 (** Definitions that are too complex to translate, so we remove them
