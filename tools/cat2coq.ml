@@ -55,6 +55,16 @@ let pprint_op1 : AST.op1 -> string -> string =
   | Star -> sprintf "%s^*"
   | Opt -> sprintf "%s?"
 
+let name_op1 : AST.op1 -> string =
+  let open AST in
+  function
+  | Inv -> "rel_inv"
+  | Comp -> "complement"
+  | ToId -> "diagonal"
+  | Plus -> "clos_trans _"
+  | Star -> "clos_refl_trans _"
+  | Opt -> "clos_refl _"
+
 type op2 = Union | Seq | Inter | Sub | Cartes | Cast | And | Arr
 
 let pprint_op2 = function
@@ -66,6 +76,17 @@ let pprint_op2 = function
   | Cast -> ":"
   | And -> "/\\"
   | Arr -> "->"
+
+let name_op2 : op2 -> string option =
+  function
+  | Union -> Some "union"
+  | Seq -> Some "rel_seq"
+  | Inter -> Some "intersection"
+  | Sub -> Some "diff"
+  | Cartes -> Some "cartesian"
+  | Cast -> None
+  | And -> None
+  | Arr -> None
 
 type exp =
   | Var of string
@@ -263,12 +284,36 @@ let rec has_notations e : bool =
   | App (e1, e2) | Let (_, e1, e2) | Try (e1, e2) -> f e1 || f e2
   | Tup es -> List.exists f es
 
-let pprint_exp_scope verbosity e =
-  if has_notations e
+let pprint_exp_scope notation verbosity e =
+  if has_notations e && notation <> Non
   then "(" ^ pprint_exp verbosity e ^ ")%cat"
   else pprint_exp verbosity e
 
 let print_exp = pprint_exp_scope
+
+
+(** Remove operators/notations from expressions *)
+
+let rec elim_ops =
+  let f = elim_ops in
+  let app1 x e1 = App (Cst x, e1) in
+  let app2 x e1 e2 = App (App (Cst x, e1), e2) in
+  function
+  | Var x -> Var x
+  | Cst x -> Cst x
+  | App (e1, e2) -> App (f e1, f e2)
+  | Fun (xs, e) -> Fun  (xs, f e)
+  | Let (x, e1, e2) -> Let (x, f e1, f e2)
+  | Fix (x, xs, e) -> Fix (x, xs, f e)
+  | Tup es -> Tup (List.map f es)
+  | Op1 (op1, e1) -> app1 (name_op1 op1) (f e1)
+  | Op2 (op2, e1, e2) ->
+     begin match name_op2 op2 with
+     | Some x -> app2 x (f e1) (f e2)
+     | None -> Op2 (op2, f e1, f e2)
+     end
+  | Try (e1, e2) -> Try (f e1, f e2)
+  | Annot (s, e) -> Annot (s, f e)
 
 
 (** Instructions, parameterized by a type for possibly-generated names *)
@@ -285,6 +330,15 @@ type 'name instr =
 
 type name = Fresh of string | Normal of string
 
+let elim_ops_instrs =
+  List.map @@
+    function
+    | Def (x, t, e, k) -> Def (x, t, elim_ops e, k)
+    | Variable (x, e) -> Variable (x, elim_ops e)
+    | Withfrom (x, y, e) -> Withfrom (x, y, elim_ops e)
+    | Inductive defs -> Inductive (List.map (fun (x, y, e) -> (x, y, elim_ops e)) defs)
+    | Comment s -> Comment s
+    | Command s -> Command s
 
 (** Free and defined variables mentioned in an instruction *)
 
@@ -516,8 +570,8 @@ let vars_of_pat : AST.pat -> string list =
   let f = function None -> "_" | Some x -> x in
   function AST.Pvar p -> [f p] | AST.Ptuple ps -> List.map f ps
 
-let rec translate_exp (notation : notation) (e : AST.exp) : exp =
-  let f e = translate_exp notation e in
+let rec translate_exp (e : AST.exp) : exp =
+  let f e = translate_exp e in
   let invalid_arg s = invalid_arg ("translate_exp: " ^ s) in
   let rec lets e2 = function
     | [] -> e2
@@ -529,10 +583,10 @@ let rec translate_exp (notation : notation) (e : AST.exp) : exp =
     | (_, AST.Ptuple _, _) -> invalid_arg "destructuring binding"
   in
   let (op1, op2) =
-    match notation with
-    | Cat -> (translate_op1_keep, translate_op2_keep)
-    | Kat -> failwith "kat unsupported"
-    | Non -> (translate_op1, translate_op2)
+    (* match notation with
+     * | _ -> *) (translate_op1_keep, translate_op2_keep)
+    (* | Kat -> failwith "kat unsupported"
+     * | Non -> (translate_op1, translate_op2) *)
   in
   let var x = Var x in
   match e with
@@ -571,8 +625,8 @@ let rec translate_exp (notation : notation) (e : AST.exp) : exp =
 
 
 (** Translate a kind of test into an expression *)
-let of_test (t : AST.test) k (e : AST.exp) : exp =
-  let e = translate_exp k e in
+let of_test (t : AST.test) (e : AST.exp) : exp =
+  let e = translate_exp e in
   let f (t : AST.do_test) = Cst (match t with
     | AST.Acyclic -> "acyclic"
     | AST.Irreflexive -> "irreflexive"
@@ -646,34 +700,34 @@ let remove_unused ~(keepalive : string list) (is : string instr list) : string i
 
 (** Simple translation: cat instruction -> ~coq instruction *)
 
-let rec translate_instr notation (i : AST.ins)
+let rec translate_instr (i : AST.ins)
   : name instr list =
   let invalid_arg s = invalid_arg ("of_instr: " ^ s) in
   let open AST in
   match i with
   | Include (_, _) -> failwith "Include should have been expanded already"
   | Test ((_, _, test, e, None), _) ->
-     [Def (Fresh "test", None, of_test test notation e, Test_definition)]
+     [Def (Fresh "test", None, of_test test e, Test_definition)]
   | Test ((_, _, test, e, Some x), _) ->
-     [Def (Normal x, None, of_test test notation e, Test_definition)]
+     [Def (Normal x, None, of_test test e, Test_definition)]
   | Let (_, [(_, Pvar Some name, _)]) when List.mem name definitions_to_remove ->
      [Comment (sprintf "Definition of %s already included in the prelude" name)]
   | Let (_, bindings) ->
      let f : AST.binding -> _ = function
-       | (_, Pvar None, exp) -> Def (Fresh "_", None, translate_exp notation exp, Normal_definition)
-       | (_, Pvar Some name, exp) -> Def (Normal name, None, translate_exp notation exp, Normal_definition)
+       | (_, Pvar None, exp) -> Def (Fresh "_", None, translate_exp exp, Normal_definition)
+       | (_, Pvar Some name, exp) -> Def (Normal name, None, translate_exp exp, Normal_definition)
        | (_, Ptuple _, _) -> invalid_arg "toplevel let with tuple"
      in List.map f bindings
   | Rec (loc, bds, Some test) ->
-     translate_instr notation (Rec (loc, bds, None)) @
-       translate_instr notation (Test (test, Check))
+     translate_instr (Rec (loc, bds, None)) @
+       translate_instr (Test (test, Check))
   | Rec (_, bindings, None) ->
      let f : AST.binding -> _ = function
-       | (_, Pvar (Some name), exp) -> (name, Fresh (name ^ "_c"), translate_exp notation exp)
+       | (_, Pvar (Some name), exp) -> (name, Fresh (name ^ "_c"), translate_exp exp)
        | (_, Pvar None, _) -> invalid_arg "nameless let rec"
        | (_, Ptuple _, _) -> invalid_arg "tuple in let rec"
      in [Inductive (List.map f bindings)]
-  | WithFrom (_, var, exp) -> [Withfrom (var, Fresh ("set_" ^ var), translate_exp notation exp)]
+  | WithFrom (_, var, exp) -> [Withfrom (var, Fresh ("set_" ^ var), translate_exp exp)]
   | UnShow    _ -> []
   | Show      _ -> []
   | ShowAs    _ -> []
@@ -1054,23 +1108,27 @@ let pprint_coq_model
   |> filter_unused_defs
 
   (* Simple line-by-line translation *)
-  |> List.map (translate_instr notation) |> List.concat
+  |> List.map translate_instr |> List.concat
 
   (* Core transformations *)
   (* TODO: maybe -- but only maybe -- some of those transformations
      would benefit from being done after elimination of unused *)
   |> transform_instrs force_defined
+
+  (* Adding definitions *)
+  |> (fun is -> start_definitions @ intro_R_W_etc @ middle_definitions @ is)
   
+  (* Handle notations *)
+  |> (fun is -> if notation <> Non
+                then Command "Open Scope cat_scope." :: is
+                else elim_ops_instrs is)
+
   (* Adding context: prelude, section, section definitions *)
-  |> (fun instrs ->
+  |> (fun is ->
     [
       (List.map (fun s -> Command s) prelude);
       [Command "Section Model."];
-      (if notation = Cat then [Command "Open Scope cat_scope."] else []);
-      start_definitions;
-      intro_R_W_etc;
-      middle_definitions;
-      instrs;
+      is;
       [Command "End Model."];
     ] |> List.concat)
 
