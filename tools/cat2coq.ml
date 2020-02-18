@@ -287,8 +287,7 @@ let axioms =
 
 (** Before generated code *)
 
-let start_text = "\
-Section Model.
+let start_text = "
 
 Variable c : candidate.
 Definition events := events c.
@@ -313,11 +312,13 @@ Definition classes_loc (S : set events) : set (set events) :=
 let end_text empty_witness_cond empty_model_cond relations =
   let relations = String.concat " " relations in
   sprintf
-"End Model.
-
+"
 Definition valid (c : candidate) := %s%s.
 "
-  (if empty_witness_cond then "" else sprintf "exists %s : relation (events c), witness_conditions c %s /\\ " relations relations)
+  (if empty_witness_cond then "" else sprintf "
+  exists %s : relation (events c),
+    witness_conditions c %s /\\
+    " relations relations)
   (if empty_model_cond then "True" else sprintf "model_conditions c %s" relations)
 
 
@@ -979,6 +980,10 @@ let pprint_coq_model
     filter_map (function Variable (x, _) -> Some x | _ -> None) instrs
   in
   
+  let all_definitions =
+    filter_map (function Def (x, _, _, _) -> Some x | _ -> None) instrs
+  in
+
   let empty_witness_cond =
     List.mem
       (Def ("witness_conditions", None, Cst "True", Normal_definition))
@@ -989,17 +994,20 @@ let pprint_coq_model
       (Def ("model_conditions", None, Cst "True", Normal_definition))
       instrs
   in
-  
+
   let groups = ref [] in
   let add lvl element = if verbosity >= lvl then groups := element :: !groups in
   
   add 1 (comment (sprintf "Translation of model %s" name));
   add 0 prelude;
+  add 0 ["Section Model."];
   add 0 [start_text];
   add 0 (print_instrs intro_R_W_etc);
   add 0 [middle_definitions];
   add 0 (if notation = Cat then ["Open Scope cat_scope."] else []);
   add 0 (print_instrs instrs);
+  add 0 ["End Model."];
+  add 0 [sprintf "Hint Unfold %s : cat." (String.concat " " all_definitions)];
   add 0 [end_text empty_witness_cond empty_model_cond all_axiom_relations];
   add 1 (comment (sprintf "End of translation of model %s" name));
   
