@@ -288,7 +288,6 @@ let axioms =
 (** Before generated code *)
 
 let start_text = "
-
 Variable c : candidate.
 Definition events := events c.
 
@@ -523,9 +522,9 @@ let of_test (t : AST.test) k (e : AST.exp) : exp =
 (** Converting cat commands instruction by instruction & recursively
    import files *)
 
-let expand_include parse_file is =
+let rec expand_include parse_file is =
   let expand_one = function
-    | AST.Include (_, filename) -> parse_file filename
+    | AST.Include (_, filename) -> expand_include parse_file (parse_file filename)
     | x -> [x]
   in
   List.(concat @@ map expand_one is)
@@ -554,19 +553,12 @@ let filter_unused_defs instrs =
     | _ -> true
   in List.rev @@ List.filter filter (List.rev instrs)
 
-let preprocess parse_file is = filter_unused_defs @@ expand_include parse_file is
-
-let rec translate_instr notation (parse_file : string -> AST.ins list) (i : AST.ins)
+let rec translate_instr notation (i : AST.ins)
   : name instr list =
   let invalid_arg s = invalid_arg ("of_instr: " ^ s) in
   let open AST in
   match i with
-  | Include (_, filename) ->
-     [Comment (sprintf "Import from %s:" filename)]
-     @ [Comment "INDENT"]
-     @ List.concat (List.map (translate_instr notation parse_file) (parse_file filename))
-     @ [Comment "DEDENT"]
-     @ [Comment (sprintf "End of import from %s" filename)]
+  | Include (_, _) -> failwith "Include should have been expanded already"
   | Test ((_, _, test, e, None), _) ->
      [Def (Fresh "Test", None, of_test test notation e, Test_definition)]
   | Test ((_, _, test, e, Some x), _) ->
@@ -580,8 +572,8 @@ let rec translate_instr notation (parse_file : string -> AST.ins list) (i : AST.
        | (_, Ptuple _, _) -> invalid_arg "toplevel let with tuple"
      in List.map f bindings
   | Rec (loc, bds, Some test) ->
-     translate_instr notation parse_file (Rec (loc, bds, None)) @
-       translate_instr notation parse_file (Test (test, Check))
+     translate_instr notation (Rec (loc, bds, None)) @
+       translate_instr notation (Test (test, Check))
   | Rec (_, bindings, None) ->
      let f : AST.binding -> _ = function
        | (_, Pvar (Some name), exp) -> (name, Fresh (name ^ "_c"), translate_exp notation exp)
@@ -600,8 +592,8 @@ let rec translate_instr notation (parse_file : string -> AST.ins list) (i : AST.
   | Debug     _ -> invalid_arg "Debug"
   | Events    _ -> invalid_arg "Events"
 
-let translate_instrs notation parse instrs =
-  List.concat (List.map (translate_instr notation parse) instrs)
+let translate_instrs notation instrs =
+  List.concat (List.map (translate_instr notation) instrs)
 
 
 (** Transform a list of instructions with Fresh-marked names to
@@ -993,11 +985,13 @@ let pprint_coq_model
   (* We automatically include stdlib.cat *)
   let instrs = AST.Include (TxtLoc.none, "stdlib.cat") :: instrs in
 
-  (* Line-by-line translation of cat commands *)
-  let instrs = translate_instrs notation parse instrs in
-  
-  (* More global transformations *)
-  let instrs = transform_instrs force_defined instrs in
+  let instrs : string instr list =
+    instrs
+    |> expand_include parse
+    |> filter_unused_defs
+    |> translate_instrs notation
+    |> transform_instrs force_defined
+  in
   
   let comment s = pprint_instr verbosity (Comment s) in
   
@@ -1040,7 +1034,7 @@ let pprint_coq_model
   add 0 (if notation = Cat then ["Open Scope cat_scope."] else []);
   add 0 (print_instrs instrs);
   add 0 ["End Model."];
-  add 0 [sprintf "Hint Unfold %s : cat." (String.concat " " all_definitions)];
+  add 0 [sprintf "\nHint Unfold %s : cat." (String.concat " " all_definitions)];
   add 0 [end_text empty_witness_cond empty_model_cond all_axiom_relations];
   add 1 (comment (sprintf "End of translation of model %s" name));
   
