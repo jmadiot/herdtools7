@@ -2,6 +2,9 @@ open Printf
 
 (** Coq-encodable expressions + try/with *)
 
+type notation = Non | Cat | Kat (* | Atbr *)
+let notation_names = [("none", Non); ("cat", Cat); ("kat", Kat)(* ; ("atbr", Atbr) *)]
+
 let pprint_op1 : AST.op1 -> string -> string =
   let open AST in
   function
@@ -12,11 +15,10 @@ let pprint_op1 : AST.op1 -> string -> string =
   | Star -> sprintf "%s^*"
   | Opt -> sprintf "%s?"
 
-type op2 = Union | Cons | Seq | Inter | Sub | Cartes | Cast | And | Arr
+type op2 = Union | Seq | Inter | Sub | Cartes | Cast | And | Arr
 
 let pprint_op2 = function
   | Union -> "∪"
-  | Cons -> "++"
   | Seq -> ";;"
   | Inter -> "∩"
   | Sub -> "\\"
@@ -167,7 +169,6 @@ let subst_with_var (sub : string StringMap.t) : exp -> exp =
 
 let level_op2 = function
   | Union -> 70
-  | Cons -> 60
   | Seq -> 55
   | Inter -> 51
   | Sub -> 45
@@ -177,7 +178,7 @@ let level_op2 = function
   | Arr -> 99
 
 let right_associative = function
-  | Union | Cons | Seq | Inter | And | Arr -> true
+  | Union | Seq | Inter | And | Arr -> true
   | Sub | Cartes | Cast -> false
 
 let rec cascade_op (o : op2) : exp -> exp list =
@@ -450,7 +451,7 @@ let rec translate_op2_keep (o : AST.op2) (es : exp list) : exp =
   | AST.Inter, [e1; e2] -> Op2 (Inter, e1, e2)
   | AST.Diff, [e1; e2] ->  Op2 (Sub, e1, e2)
   | AST.Cartesian, [e1; e2] -> Op2 (Cartes, e1, e2)
-  | AST.Add, [e1; e2] -> Op2 (Cons, e1, e2)
+  | AST.Add, [_; _] -> failwith "adding elements to lists not in the supported subset of cat"
   | AST.Seq, [e] -> e
   | AST.Seq, (e :: l) -> Op2 (Seq, e, translate_op2_keep AST.Seq l)
   | _ -> translate_op2 o es
@@ -462,8 +463,8 @@ let vars_of_pat : AST.pat -> string list =
   let f = function None -> "_" | Some x -> x in
   function AST.Pvar p -> [f p] | AST.Ptuple ps -> List.map f ps
 
-let rec translate_exp (keepnotations : bool) (e : AST.exp) : exp =
-  let f e = translate_exp keepnotations e in
+let rec translate_exp (notation : notation) (e : AST.exp) : exp =
+  let f e = translate_exp notation e in
   let invalid_arg s = invalid_arg ("translate_exp: " ^ s) in
   let rec lets e2 = function
     | [] -> e2
@@ -475,9 +476,10 @@ let rec translate_exp (keepnotations : bool) (e : AST.exp) : exp =
     | (_, AST.Ptuple _, _) -> invalid_arg "destructuring binding"
   in
   let (op1, op2) =
-    if keepnotations
-    then (translate_op1_keep, translate_op2_keep)
-    else (translate_op1, translate_op2)
+    match notation with
+    | Cat -> (translate_op1_keep, translate_op2_keep)
+    | Kat -> failwith "kat unsupported"
+    | Non -> (translate_op1, translate_op2)
   in
   let var x = Var x in
   match e with
@@ -509,7 +511,7 @@ let rec translate_exp (keepnotations : bool) (e : AST.exp) : exp =
      Fun (vars_of_pat pat, f exp)
   | AST.ExplicitSet (_, []) -> Op2 (Cast, Cst "empty", App (Cst "set", Cst "_"))
   | AST.ExplicitSet (_, [e]) -> App (Cst "singleton", f e)
-  | AST.ExplicitSet (l, (e :: t)) -> Op2 (Cons, f e, f (AST.ExplicitSet (l, t)))
+  | AST.ExplicitSet (_, (_ :: _)) -> failwith "adding elements to lists not in the supported subset of cat"
   | AST.Match _ -> invalid_arg "match not implemented"
   | AST.MatchSet _ -> invalid_arg "matchset not implemented"
   | AST.If _ -> invalid_arg "if"
@@ -531,7 +533,7 @@ let of_test (t : AST.test) k (e : AST.exp) : exp =
 (** Converting cat commands instruction by instruction & recursively
    import files *)
 
-let rec translate_instr k (parse_file : string -> AST.ins list) (i : AST.ins)
+let rec translate_instr notation (parse_file : string -> AST.ins list) (i : AST.ins)
   : name instr list =
   let invalid_arg s = invalid_arg ("of_instr: " ^ s) in
   let open AST in
@@ -539,31 +541,31 @@ let rec translate_instr k (parse_file : string -> AST.ins list) (i : AST.ins)
   | Include (_, filename) ->
      [Comment (sprintf "Import from %s:" filename)]
      @ [Comment "INDENT"]
-     @ List.concat (List.map (translate_instr k parse_file) (parse_file filename))
+     @ List.concat (List.map (translate_instr notation parse_file) (parse_file filename))
      @ [Comment "DEDENT"]
      @ [Comment (sprintf "End of import from %s" filename)]
   | Test ((_, _, test, e, None), _) ->
-     [Def (Fresh "Test", None, of_test test k e, Test_definition)]
+     [Def (Fresh "Test", None, of_test test notation e, Test_definition)]
   | Test ((_, _, test, e, Some x), _) ->
-     [Def (Normal x, None, of_test test k e, Test_definition)]
+     [Def (Normal x, None, of_test test notation e, Test_definition)]
   | Let (_, [(_, Pvar Some name, _)]) when List.mem name definitions_to_remove ->
      [Comment (sprintf "Definition of %s already included in the prelude" name)]
   | Let (_, bindings) ->
      let f : AST.binding -> _ = function
-       | (_, Pvar None, exp) -> Def (Fresh "_", None, translate_exp k exp, Normal_definition)
-       | (_, Pvar Some name, exp) -> Def (Normal name, None, translate_exp k exp, Normal_definition)
+       | (_, Pvar None, exp) -> Def (Fresh "_", None, translate_exp notation exp, Normal_definition)
+       | (_, Pvar Some name, exp) -> Def (Normal name, None, translate_exp notation exp, Normal_definition)
        | (_, Ptuple _, _) -> invalid_arg "toplevel let with tuple"
      in List.map f bindings
   | Rec (loc, bds, Some test) ->
-     translate_instr k parse_file (Rec (loc, bds, None)) @
-       translate_instr k parse_file (Test (test, Check))
+     translate_instr notation parse_file (Rec (loc, bds, None)) @
+       translate_instr notation parse_file (Test (test, Check))
   | Rec (_, bindings, None) ->
      let f : AST.binding -> _ = function
-       | (_, Pvar (Some name), exp) -> (name, Fresh (name ^ "_c"), translate_exp k exp)
+       | (_, Pvar (Some name), exp) -> (name, Fresh (name ^ "_c"), translate_exp notation exp)
        | (_, Pvar None, _) -> invalid_arg "nameless let rec"
        | (_, Ptuple _, _) -> invalid_arg "tuple in let rec"
      in [Inductive (List.map f bindings)]
-  | WithFrom (_, var, exp) -> [Withfrom (var, Fresh ("set_" ^ var), translate_exp k exp)]
+  | WithFrom (_, var, exp) -> [Withfrom (var, Fresh ("set_" ^ var), translate_exp notation exp)]
   | UnShow    _ -> []
   | Show      _ -> []
   | ShowAs    _ -> []
@@ -575,8 +577,8 @@ let rec translate_instr k (parse_file : string -> AST.ins list) (i : AST.ins)
   | Debug     _ -> invalid_arg "Debug"
   | Events    _ -> invalid_arg "Events"
 
-let translate_instrs keepnotations parse instrs =
-  List.concat (List.map (translate_instr keepnotations parse) instrs)
+let translate_instrs notation parse instrs =
+  List.concat (List.map (translate_instr notation parse) instrs)
 
 
 (** Transform a list of instructions with Fresh-marked names to
@@ -764,15 +766,6 @@ let extract_from_list (f : 'a -> 'b option) : 'a list -> ('a list * 'b list) =
        | Some b -> extr al (b :: bl) l
   in extr [] []
 
-let conjunction_of_exps (l : exp list) : exp =
-  if l = [] then
-    Cst "True"
-  else
-    fold_right1 (fun x y -> Op2 (And, x, y)) l
-
-let conjunction_of_vars (vars : string list) : exp =
-  conjunction_of_exps (List.map (fun x -> Var x) vars)
-
 let split_on_char sep s =
   let open String in
   let r = ref [] in
@@ -785,8 +778,19 @@ let split_on_char sep s =
   done;
   sub s 0 !j :: !r
 
+let assoc_inv : 'b -> ('a * 'b) list -> 'a =
+  fun b l -> List.assoc b (List.map (fun (a, b) -> (b, a)) l)
 
 (** Collects conditions and gather them at the end *)
+
+let conjunction_of_exps (l : exp list) : exp =
+  if l = [] then
+    Cst "True"
+  else
+    fold_right1 (fun x y -> Op2 (And, x, y)) l
+
+let conjunction_of_vars (vars : string list) : exp =
+  conjunction_of_exps (List.map (fun x -> Var x) vars)
 
 let collect_conditions instrs : string instr list =
   (* Get the name of all the test declared *)
@@ -955,7 +959,7 @@ prelude nor provided by the candidate:
 
 let pprint_coq_model
       (verbosity : int)
-      (keepnotations : bool)
+      (notation : notation)
       (force_defined : string list)
       (prelude : string list)
       (parse_file : string -> AST.t)
@@ -967,7 +971,7 @@ let pprint_coq_model
   let instrs = AST.Include (TxtLoc.none, "stdlib.cat") :: instrs in
 
   (* Line-by-line translation of cat commands *)
-  let instrs = translate_instrs keepnotations parse instrs in
+  let instrs = translate_instrs notation parse instrs in
   
   (* More global transformations *)
   let instrs = transform_instrs force_defined instrs in
@@ -1005,7 +1009,7 @@ let pprint_coq_model
   add 0 [start_text];
   add 0 (print_instrs intro_R_W_etc);
   add 0 [middle_definitions];
-  add 0 (if keepnotations then ["Open Scope cat_scope."] else []);
+  add 0 (if notation = Cat then ["Open Scope cat_scope."] else []);
   add 0 (print_instrs instrs);
   add 0 [end_text empty_witness_cond empty_model_cond all_axiom_relations];
   add 1 (comment (sprintf "End of translation of model %s" name));
@@ -1023,12 +1027,13 @@ let debug = ref false
 let force_defined = ref []
 let includes = ref []
 let makefile = ref false
-let notations = ref true
+let notation = ref Cat
 let output_file = ref None
 let overwrite = ref false
 let prelude = ref true
 let quiet = ref false
 let verbosity = ref 1
+let yescat = ref false
 
 let prog =
   if Array.length Sys.argv > 0 then
@@ -1102,11 +1107,18 @@ let options =
        "
         do not write Cat.v\n")
   ;
-    ("-nonotations",
-     Arg.Unit (fun () -> notations := false),
+    ("-notations",
+     Arg.String (fun s -> try notation := List.assoc s notation_names
+                          with Not_found -> failwith (sprintf "invalid notation: %s" s)),
      sprintf
-       "
-        do not keep notations, uses regular identifiers instead\n")
+       "%s
+        notation system (default %s):
+          none: define and use no notations
+          cat:  define and use notations that look like .cat files
+          kat:  import notations from the RelationAlgebra library\n"
+       (String.concat "|" (List.map fst notation_names))
+       (assoc_inv !notation notation_names)
+    )
   ;
     ("-noprelude",
      Arg.Unit (fun () -> prelude := false),
@@ -1134,16 +1146,20 @@ let options =
      Arg.Unit (fun () -> quiet := true),
      sprintf
        "
-        quiet: read and parse files but do not write anything\n"
-    )
+        quiet: read and parse files but do not write anything\n")
   ;
     ("-v",
      Arg.Int (fun n -> verbosity := n),
      sprintf
        "<integer>
         verbosity level: more or less annotations in generated files.
-        For now, can be either 0 and 1 (default 1)\n"
-    )
+        For now, can be either 0 and 1 (default 1)\n")
+  ;
+    ("-yescat",
+     Arg.Unit (fun () -> yescat := true),
+     sprintf
+       "
+        write Cat.v even if no .cat argument is given\n")
   ]
 
 let () =
@@ -1187,7 +1203,7 @@ let handle_filename fname prelude outchannel =
   let text =
     pprint_coq_model
       !verbosity
-      !notations
+      !notation
       !force_defined
       prelude
       Parser.parse
@@ -1238,32 +1254,33 @@ let () =
            "stdlib"; "tso"; "uni"; "uniproc"; "uniproccat";
            "uniproc-normw-cat"; "uniproc+sca"; "x86fences"; "x86tso"];
     
-    if !args = [] then
+    if !args = [] && not !yescat then
       printf "%s\n" usage
       |> return;
 
     let pre = if !prelude then read_file (libfind "prelude_cat2coq.v") else [] in
-    
+
     let careful_open_out filename =
-      if !overwrite || not (Sys.file_exists filename) then
-        open_out filename
-      else
+      if Sys.file_exists filename && not !overwrite then
         failwith (sprintf "File '%s' already exists. Use option \
                            -overwrite to ignore existing files."
                     filename)
+      else
+        (if !verbosity >= 2 then eprintf "Opening file for writing: %s\n" filename;
+         open_out filename)
     in
-    
+
     (* Output Cat.v file *)
     let () =
-      if !cat && !prelude then
+      if (!cat || !yescat) && !prelude then
         let o = careful_open_out "Cat.v" in
         List.iter (fprintf o "%s\n") pre
     in
-    
+
     let trace fname = current_filename := Some fname; fname in
     let import = ["From Coq Require Import Relations String.";
                   "Require Import Cat."] in
-    
+
     begin match !args, !quiet, !output_file with
     | [fname], false, Some "-" -> handle_filename (trace fname) import (Some stdout)
     | [fname], false, Some outfile -> handle_filename (trace fname) import (Some (careful_open_out outfile))
@@ -1282,13 +1299,13 @@ let () =
         let fnames = List.sort compare fnames in
         let files = List.map normalize_filename fnames in
         let v l = String.concat " " (List.map (fun x -> x ^ ".v") l) in
-        
+
         let o = careful_open_out "importeverything.v" in
         fprintf o "Require Import Cat Relations.\n";
         fprintf o "Require %s.\n\n" (String.concat " " files);
         List.iter (fprintf o "Check %s.valid.\n") files;
         close_out o;
-        
+
         let o = careful_open_out "Makefile" in
         fprintf o "
 cat_vs=%s

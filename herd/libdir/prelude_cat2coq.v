@@ -84,7 +84,6 @@ Declare Scope cat_scope.
 Delimit Scope cat_scope with cat.
 
 Infix "∪" := union        (at level 70, right associativity) : cat_scope.
-Infix "++":= add_element  (at level 60, right associativity) : cat_scope.
 Infix ";;" := rel_seq     (at level 55, right associativity) : cat_scope.
 Infix "∩" := intersection (at level 51, right associativity) : cat_scope.
 Infix "\" := diff         (at level 45, left associativity)  : cat_scope.
@@ -93,7 +92,7 @@ Infix "*" := cartesian    (at level 40, left associativity)  : cat_scope.
 (* Caution: not the same precedence as in cat for ~ *)
 Notation "~ x" := (complement x) (at level 75, right associativity)         : cat_scope.
 Notation " [ x ] " := (diagonal x)                                          : cat_scope.
-Notation " x ^-1 " := (rel_inv x)           (at level 30, no associativity) : cat_scope.
+Notation " x ^-1  ":= (rel_inv x)           (at level 30, no associativity) : cat_scope.
 Notation " x ^+ "  := (clos_trans _ x)      (at level 30, no associativity) : cat_scope.
 Notation " x ^* "  := (clos_refl_trans _ x) (at level 30, no associativity) : cat_scope.
 Notation " x ? "   := (clos_refl _ x)       (at level 30, no associativity) : cat_scope.
