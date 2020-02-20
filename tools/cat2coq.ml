@@ -838,7 +838,7 @@ let rec some_inlining : string instr list -> string instr list =
   let replace x e = instrs_subst (StringMap.singleton x e) in
   function
   | [] -> []
-  | Def (("invrf" as x), _, (Op1 (AST.Inv, Var "rf") as e), Normal_definition) :: is ->
+  | Def (x, _, (Op1 (AST.Inv, Var "rf") as e), Normal_definition) :: is ->
      some_inlining (replace x e is)
   | i :: is -> i :: some_inlining is
 
