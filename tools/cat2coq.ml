@@ -10,6 +10,9 @@ let rec filter_map (f : 'a -> 'b option) : 'a list -> 'b list =
      | None -> filter_map f l
      | Some b -> b :: filter_map f l
 
+let list_bind : 'a list -> ('a -> 'b list) -> 'b list =
+  List.(fun l f -> concat (map f l))
+
 let rec fold_right1 (f : 'a -> 'a -> 'a) : 'a list -> 'a =
   function
   | [] -> invalid_arg "fold_right1"
@@ -220,45 +223,16 @@ let fresh (x : string) (vars : StringSet.t) =
 (** Substitution, used in shadowing elimination *)
 
 let rec subst (sub : exp StringMap.t) : exp -> exp =
-  (* We are about to apply the substitution [sub] in an expression
-     [body] where [x] is binding e.g. [fun x -> body]. This returns
-     [x', body', sub'] to prepare for the substitution -- but it does
-     not do the substitution *)
-  let abs x body sub =
-    let open StringSet in
-    let fv_sub = unions (List.map (fun (_, e) -> free_vars e)
-                          (StringMap.bindings sub)) in
-    if mem x fv_sub then
-      (* If [x] appears in the codomain of [sub] we must alpha-convert
-         it to a locally fresh [x'] *)
-      let x' = fresh x (union fv_sub (free_vars body)) in
-      let body' = subst (StringMap.singleton x (Var x')) body in
-      (x', body', sub)
-    else
-      (* Otherwise, nothing to do, except removing a possible [x] from
-         the domain of [sub] *)
-      (x, body, StringMap.remove x sub)
-  in
-  
-  (* Do the same thing for a sequence of variables *)
-  let rec abs' xs body sub =
-    match xs with
-    | [] -> ([], body, sub)
-    | x :: xs ->
-       let (x', body', sub') = abs x body sub in
-       let (xs', body'', sub'') = abs' xs body' sub'
-       in (x' :: xs', body'', sub'')
-  in
   function
   | Var x           -> StringMap.safe_find (Var x) x sub
   | Cst s           -> Cst s
   | App (e1, e2)    -> App (subst sub e1, subst sub e2)
-  | Fun (xs, e)     -> let (xs, e, sub) = abs' xs e sub in
+  | Fun (xs, e)     -> let (xs, e, sub) = abs_subst_list xs e sub in
                        Fun(xs, subst sub e)
   | Let (x, e1, e2) -> let e1 = subst sub e1 in (* x not binding in e1 *)
-                       let (x, e2, sub) = abs x e2 sub in
+                       let (x, e2, sub) = abs_subst x e2 sub in
                        Let (x, e1, subst sub e2)
-  | Fix (x, xs, e)  -> let (xxs, e, sub) = abs' (x :: xs) e sub in
+  | Fix (x, xs, e)  -> let (xxs, e, sub) = abs_subst_list (x :: xs) e sub in
                        Fix (List.hd xxs, List.tl xxs, subst sub e)
   | Tup es          -> Tup (List.map (subst sub) es)
   | Op0 o           -> Op0 o
@@ -266,6 +240,35 @@ let rec subst (sub : exp StringMap.t) : exp -> exp =
   | Op2 (o, e1, e2) -> Op2 (o, subst sub e1, subst sub e2)
   | Try (e1, e2)    -> Try (subst sub e1, subst sub e2)
   | Annot (s, e)    -> Annot (s, subst sub e)
+
+(* To apply the substitution [sub] in an expression [body] where [x]
+   is binding e.g. [fun x -> body], [abs_subst x body sub] returns
+   [x', body', sub'] to prepare for the substitution -- but does not
+   perform the substitution *)
+and abs_subst (x : string) (body : exp) (sub : exp StringMap.t) =
+  let open StringSet in
+  let fv_sub = unions (List.map (fun (_, e) -> free_vars e)
+                         (StringMap.bindings sub)) in
+  if mem x fv_sub then
+    (* If [x] appears in the codomain of [sub] we must alpha-convert
+         it to a locally fresh [x'] *)
+    let x' = fresh x (union fv_sub (free_vars body)) in
+    let body' = subst (StringMap.singleton x (Var x')) body in
+    (x', body', sub)
+  else
+    (* Otherwise, nothing to do, except removing a possible [x] from
+         the domain of [sub] *)
+    (x, body, StringMap.remove x sub)
+  
+(* Same thing for a sequence of variables *)
+and abs_subst_list (xs : string list) (body : exp) (sub : exp StringMap.t) =
+    match xs with
+    | [] -> ([], body, sub)
+    | x :: xs ->
+       let (x', body', sub') = abs_subst x body sub in
+       let (xs', body'', sub'') = abs_subst_list xs body' sub'
+       in (x' :: xs', body'', sub'')
+
 
 let subst_with_var (sub : string StringMap.t) : exp -> exp =
   subst (StringMap.map (fun x -> Var x) sub)
@@ -386,6 +389,33 @@ let instrs_map (f : exp -> exp) =
     | Inductive defs -> Inductive (List.map (fun (x, y, e) -> (x, y, f e)) defs)
     | Comment s -> Comment s
     | Command s -> Command s
+
+let rec instrs_subst (sub : exp StringMap.t) : string instr list -> string instr list =
+  let open StringSet in
+  let fv_sub = unions (List.map (fun (_, e) -> free_vars e)
+                         (StringMap.bindings sub)) in
+  let clash xs set = not (is_empty (inter (of_list xs) set)) in
+  let err () = invalid_arg "instrs_subst: substitution would need to change a public name" in
+  let rm xs sub = let (_, _, sub) = abs_subst_list xs (Cst "dummy") sub in sub in
+  (* We raise an exception when we need alpha-conversion, so the only
+     purpose of abs_subst is to remove bindings from sub in case of
+     shadowing *)
+  function
+  | [] -> []
+  | (Def (x, _, _, _) | Variable (x, _)) :: _ when mem x fv_sub -> err ()
+  | Withfrom (x, y, _) :: _ when clash [x; y] fv_sub -> err ()
+  | Inductive defs :: _ when clash (list_bind defs (fun (x, y, _) -> [x; y])) fv_sub -> err ()
+  | Def (x, t, e, k) :: is ->
+     Def (x, t, subst sub e, k) :: instrs_subst (rm [x] sub) is
+  | Variable (x, e) :: is ->
+     Variable (x, subst sub e) :: instrs_subst (rm [x] sub) is
+  | Withfrom (x, y, e) :: is ->
+     Withfrom (x, y, subst sub e) :: instrs_subst (rm [x;y] sub) is
+  | Inductive defs :: is ->
+     let vars = list_bind defs (fun (x, y, _) -> [x; y]) in
+     Inductive (List.map (fun (x, y, e) -> (x, y, subst sub e)) defs) :: instrs_subst (rm vars sub) is
+  | (Comment _ | Command _ as i) :: is -> i :: instrs_subst sub is
+
 
 (** Remove operators/notations from expressions *)
 
@@ -800,6 +830,17 @@ let remove_unused ~(keepalive : string list) (is : string instr list) : string i
     | (Comment _ | Command _) as i :: is -> i :: clean keep is
   in
   List.rev (clean (of_list keepalive) (List.rev is))
+
+
+(** Inlining *)
+
+let rec some_inlining : string instr list -> string instr list =
+  let replace x e = instrs_subst (StringMap.singleton x e) in
+  function
+  | [] -> []
+  | Def (("invrf" as x), _, (Op1 (AST.Inv, Var "rf") as e), Normal_definition) :: is ->
+     some_inlining (replace x e is)
+  | i :: is -> i :: some_inlining is
 
 
 (** Simple translation: cat instruction -> ~coq instruction *)
@@ -1255,6 +1296,9 @@ let pprint_coq_model
 
   (* Remove unused definitions *)
   |> remove_unused ~keepalive:["events"; "witness_conditions"; "model_conditions"]
+
+  (* Inline some definitions *)
+  |> some_inlining
 
   (* Adding unfold hints *)
   |> (fun instrs ->
