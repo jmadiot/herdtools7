@@ -1,7 +1,10 @@
-(* Start of prelude for coq translation of .cat files *)
-From Coq Require Import Ensembles Relations RelationClasses List String.
+(** Start of prelude for coq translation of .cat files *)
+From Coq Require Import Ensembles List String RelationClasses.
+(** This prelude uses definitions from RelationAlgebra *)
+From RelationAlgebra Require Import all.
 
 Definition set := Ensemble.
+Definition relation A := hrel A A.
 
 Class SetLike A :=
   { union : A -> A -> A;
@@ -18,11 +21,11 @@ Instance SetLike_set (A : Type) : SetLike (set A) :=
      incl := Included A |}.
 
 Instance SetLike_relation (A : Type) : SetLike (relation A) :=
-  {| union := Relation_Operators.union A;
-     intersection := fun R S x y => R x y /\ S x y;
-     diff := fun R S x y => R x y /\ ~S x y;
-     universal := fun x y => True;
-     incl := fun R S => forall x y, R x y -> S x y |}.
+  {| union := cup;
+     intersection := cap;
+     diff := fun R S => cap R (neg S);
+     universal := top;
+     incl := leq |}.
 
 Definition complement {A} `{SetLike A} (x : A) := diff universal x.
 
@@ -30,9 +33,9 @@ Definition empty {A} `{SetLike A} : A := diff universal universal.
 
 Definition is_empty {A} `{SetLike A} (x : A) : Prop := incl x (diff universal universal).
 
-Definition rel_seq {A} : relation A -> relation A -> relation A := fun R S => fun x z => exists y, R x y /\ S y z.
+Definition rel_seq {A} : relation A -> relation A -> relation A := dot A A A.
 
-Definition rel_inv {A} : relation A -> relation A := fun R => fun x y => R y x.
+Definition rel_inv {A} : relation A -> relation A := cnv A A.
 
 Definition cartesian {A} : set A -> set A -> relation A := fun X Y x y => X x /\ Y y.
 
@@ -44,13 +47,13 @@ Definition range {A} : relation A -> set A := fun R y => exists x, R x y.
 
 Definition irreflexive {A} (R : relation A) := forall x, ~R x x.
 
-Notation refl_clos := (clos_refl _) (only parsing).
+Notation refl_clos := (fun R => union R id) (only parsing).
 
-Notation trans_clos := (clos_trans _) (only parsing).
+Notation trans_clos := (hrel_str _) (only parsing).
 
-Notation refl_trans_clos := (clos_refl_trans _) (only parsing).
+Notation refl_trans_clos := (hrel_itr _) (only parsing).
 
-Definition acyclic {A} (R : relation A) := irreflexive (clos_trans A R).
+Definition acyclic {A} (R : relation A) := incl (intersection (trans_clos R) id) empty.
 
 Class StrictTotalOrder {A} (R : relation A) :=
   { StrictTotalOrder_Strict :> StrictOrder R;
@@ -75,21 +78,7 @@ Definition cross {A} (Si : set (set (relation A))) : set (relation A) :=
 Definition diagonal {A} : set A -> relation A := fun X x y => X x /\ x = y.
 
 Declare Scope cat_scope.
-Delimit Scope cat_scope with cat.
-
-Infix "∪" := union        (at level 70, right associativity) : cat_scope.
-Infix ";;" := rel_seq     (at level 55, right associativity) : cat_scope.
-Infix "∩" := intersection (at level 51, right associativity) : cat_scope.
-Infix "\" := diff         (at level 45, left associativity)  : cat_scope.
-Infix "*" := cartesian    (at level 40, left associativity)  : cat_scope.
-
-(* Caution: not the same precedence as in cat for ~ *)
-Notation "~ x" := (complement x) (at level 75, right associativity)         : cat_scope.
-Notation " [ x ] " := (diagonal x)                                          : cat_scope.
-Notation " x ^-1  ":= (rel_inv x)           (at level 30, no associativity) : cat_scope.
-Notation " x ^+ "  := (clos_trans _ x)      (at level 30, no associativity) : cat_scope.
-Notation " x ^* "  := (clos_refl_trans _ x) (at level 30, no associativity) : cat_scope.
-Notation " x ? "   := (clos_refl _ x)       (at level 30, no associativity) : cat_scope.
+Notation " [ x ] " := (diagonal x) : cat_scope.
 
 (* Execution given as an argument to the model *)
 
@@ -126,5 +115,6 @@ Record candidate :=
   }.
 
 Hint Unfold events W R IW FW B RMW F po addr data ctrl rmw amo rf loc ext int unknown_set unknown_relation : cat_record.
-Hint Unfold union intersection diff universal incl SetLike_set SetLike_relation : cat_defs.
+Hint Unfold union intersection diff universal incl SetLike_set SetLike_relation rel_seq rel_inv : cat_defs.
+
 (** End of prelude *)

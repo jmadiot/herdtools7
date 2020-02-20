@@ -42,18 +42,32 @@ let assoc_inv : 'b -> ('a * 'b) list -> 'a =
 
 (** Coq-encodable expressions + try/with *)
 
+type definitions = Stdlib | Ra (* | Atbr *)
+let defs_names = [("stdlib", Stdlib); ("ra", Ra)]
 type notation = Non | Cat | Kat (* | Atbr *)
 let notation_names = [("none", Non); ("cat", Cat); ("kat", Kat)(* ; ("atbr", Atbr) *)]
 
-let pprint_op1 : AST.op1 -> string -> string =
+let pprint_op1 : definitions -> AST.op1 -> string -> string =
   let open AST in
   function
-  | Inv -> sprintf "%s^-1"
-  | Comp -> sprintf "~%s"
-  | ToId -> sprintf "[%s]"
-  | Plus -> sprintf "%s^+"
-  | Star -> sprintf "%s^*"
-  | Opt -> sprintf "%s?"
+  | Stdlib ->
+     begin function
+       | Inv -> sprintf "%s^-1"
+       | Comp -> sprintf "~%s"
+       | ToId -> sprintf "[%s]"
+       | Plus -> sprintf "%s^+"
+       | Star -> sprintf "%s^*"
+       | Opt -> sprintf "%s?"
+     end
+  | Ra ->
+     begin function
+       | Inv -> sprintf "%s°"
+       | Comp -> sprintf "!%s"
+       | ToId -> invalid_arg "ra: ToId was not converted away"
+       | Plus -> sprintf "%s^+"
+       | Star -> sprintf "%s^*"
+       | Opt -> invalid_arg "ra: Opt was not converted away"
+     end
 
 let name_op1 : AST.op1 -> string =
   let open AST in
@@ -61,21 +75,47 @@ let name_op1 : AST.op1 -> string =
   | Inv -> "rel_inv"
   | Comp -> "complement"
   | ToId -> "diagonal"
-  | Plus -> "clos_trans _"
-  | Star -> "clos_refl_trans _"
-  | Opt -> "clos_refl _"
+  | Plus -> "trans_clos"
+  | Star -> "refl_trans_clos"
+  | Opt -> "refl_clos"
+
+type op0 = Empty | Universal | Id
+
+let pprint_op0 = function
+  | Empty -> "empty"
+  | Universal -> "universal"
+  | Id -> "id"
+
+let pprint_op0_ra = function
+  | Empty -> "0"
+  | Universal -> "top"
+  | Id -> "1"
 
 type op2 = Union | Seq | Inter | Sub | Cartes | Cast | And | Arr
 
 let pprint_op2 = function
-  | Union -> "∪"
-  | Seq -> ";;"
-  | Inter -> "∩"
-  | Sub -> "\\"
-  | Cartes -> "*"
-  | Cast -> ":"
-  | And -> "/\\"
-  | Arr -> "->"
+  | Stdlib ->
+     begin function 
+       | Union -> "∪"
+       | Seq -> ";;"
+       | Inter -> "∩"
+       | Sub -> "\\"
+       | Cartes -> "*"
+       | Cast -> ":"
+       | And -> "/\\"
+       | Arr -> "->"
+     end
+  | Ra -> 
+    begin function
+      | Union -> "⊔"
+      | Seq -> "⋅"
+      | Inter -> "⊓"
+      | Sub -> invalid_arg "ra: Sub was not converted away"
+      | Cartes -> "*"
+      | Cast -> ":"
+      | And -> "/\\"
+      | Arr -> "->"
+    end
 
 let name_op2 : op2 -> string option =
   function
@@ -96,6 +136,7 @@ type exp =
   | Let of string * exp * exp
   | Fix of string * string list * exp
   | Tup of exp list
+  | Op0 of op0
   | Op1 of AST.op1 * exp
   | Op2 of op2 * exp * exp
   | Try of exp * exp
@@ -113,6 +154,7 @@ let rec free_vars : exp -> StringSet.t =
   | Let (x, e1, e2) -> f e1 + remove x (f e2)
   | Fix (x, xs, e) -> f (Fun (x :: xs, e))
   | Tup es -> unions (List.map f es)
+  | Op0 _ -> empty
   | Op1 (_, e1) -> f e1
   | Op2 (_, e1, e2) -> f e1 + f e2
   | Try (e1, e2) -> f e1 + f e2
@@ -133,6 +175,7 @@ let rec tried_vars : exp -> StringSet.t =
   | Let (x, e1, e2) -> f e1 + remove x (f e2)
   | Fix (x, xs, e) -> f (Fun (x :: xs, e))
   | Tup es -> unions (List.map f es)
+  | Op0 _ -> empty
   | Op1 (_, e1) -> f e1
   | Op2 (_, e1, e2) -> f e1 + f e2
   | Try (e1, e2) -> free_vars e1 + f e2
@@ -153,6 +196,7 @@ let rec used_vars : exp -> StringSet.t =
   | Let (x, e1, e2) -> f e1 + remove x (f e2)
   | Fix (x, xs, e) -> f (Fun (x :: xs, e))
   | Tup es -> unions (List.map f es)
+  | Op0 _ -> empty
   | Op1 (_, e1) -> f e1
   | Op2 (_, e1, e2) -> f e1 + f e2
   | Try (_, e2) -> f e2
@@ -217,6 +261,7 @@ let rec subst (sub : exp StringMap.t) : exp -> exp =
   | Fix (x, xs, e)  -> let (xxs, e, sub) = abs' (x :: xs) e sub in
                        Fix (List.hd xxs, List.tl xxs, subst sub e)
   | Tup es          -> Tup (List.map (subst sub) es)
+  | Op0 o           -> Op0 o
   | Op1 (o, e1)     -> Op1 (o, subst sub e1)
   | Op2 (o, e1, e2) -> Op2 (o, subst sub e1, subst sub e2)
   | Try (e1, e2)    -> Try (subst sub e1, subst sub e2)
@@ -238,17 +283,35 @@ let level_op2 = function
   | And -> 80
   | Arr -> 99
 
-let right_associative = function
-  | Union | Seq | Inter | And | Arr -> true
-  | Sub | Cartes | Cast -> false
+type associativity = Associative | LeftAssociative | RightAssociative | NotAssociative
+
+let associativity defs = function
+  | Union | Seq | Inter -> Associative
+  | And -> Associative
+  | Arr -> RightAssociative
+  | Sub ->
+     (match defs with
+      | Stdlib -> LeftAssociative
+      | Ra -> NotAssociative)
+  | Cartes | Cast -> NotAssociative
 
 let rec cascade_op (o : op2) : exp -> exp list =
   function
-  | Op2 (o', e1, e2) when o = o' -> e1 :: cascade_op o e2
+  | Op2 (o', e1, e2) when o = o' -> cascade_op o e1 @ cascade_op o e2
   | e -> [e]
 
-let rec pprint_exp verbosity e =
-  let p = pprint_exp verbosity in
+let rec cascade_left_op (o : op2) : exp -> exp list =
+  function
+  | Op2 (o', e1, e2) when o = o' -> cascade_left_op o e1 @ [e2]
+  | e -> [e]
+
+let rec cascade_right_op (o : op2) : exp -> exp list =
+  function
+  | Op2 (o', e1, e2) when o = o' -> e1 :: cascade_right_op o e2
+  | e -> [e]
+
+let rec pprint_exp verbosity defs e =
+  let p = pprint_exp verbosity defs in
   let ppar e = match e with
     | Var x | Cst x -> x
     | Op1 (AST.ToId, _) -> p e
@@ -261,12 +324,20 @@ let rec pprint_exp verbosity e =
   | App (App (e1, e2), e3) -> ppar e1 ^ " " ^ ppar e2 ^ " " ^ ppar e3
   | App (e1, Tup es) -> ppar e1 ^ " " ^ concat " " (List.map ppar es)
   | App (e1, e2) -> ppar e1 ^ " " ^ ppar e2
-  | Op1 (o, e1) -> pprint_op1 o (ppar e1)
+  | Op0 o -> pprint_op0 o
+  | Op1 (o, e1) -> pprint_op1 defs o (ppar e1)
   | Op2 (o, e1, e2) ->
-     if right_associative o then
-       concat (" " ^ pprint_op2 o ^ " ") (List.map ppar (e1 :: cascade_op o e2))
-     else
-       sprintf "%s %s %s" (ppar e1) (pprint_op2 o) (ppar e2)
+     (* TODO after testing is set up: factor all this*)
+     begin match associativity defs o with
+     | Associative ->
+        concat (" " ^ pprint_op2 defs o ^ " ") (List.map ppar (e1 :: cascade_op o e2))
+     | RightAssociative ->
+        concat (" " ^ pprint_op2 defs o ^ " ") (List.map ppar (e1 :: cascade_right_op o e2))
+     | LeftAssociative ->
+        concat (" " ^ pprint_op2 defs o ^ " ") (List.map ppar (cascade_left_op o e1 @ [e2]))
+     | NotAssociative ->
+       sprintf "%s %s %s" (ppar e1) (pprint_op2 defs o) (ppar e2)
+     end
   | Tup l -> "(" ^ (concat ", " (List.map p l)) ^ ")"
   | Fun (xs, e) -> sprintf "fun %s => %s" (concat " " xs) (p e)
   | Fix (f, xs, body) -> sprintf "fix %s %s := %s" f (concat " " xs) (p body)
@@ -279,41 +350,17 @@ let rec has_notations e : bool =
   let f = has_notations in
   match e with
   | Var _ | Cst _ -> false
-  | Op1 (_, _) | Op2 (_, _, _) -> true
+  | Op0 _ | Op1 (_, _) | Op2 (_, _, _) -> true
   | Fun(_, e) | Fix (_, _, e) | Annot (_, e) -> f e
   | App (e1, e2) | Let (_, e1, e2) | Try (e1, e2) -> f e1 || f e2
   | Tup es -> List.exists f es
 
-let pprint_exp_scope notation verbosity e =
+let pprint_exp_scope notation verbosity defs e =
   if has_notations e && notation <> Non
-  then "(" ^ pprint_exp verbosity e ^ ")%cat"
-  else pprint_exp verbosity e
+  then "(" ^ pprint_exp verbosity defs e ^ ")%cat"
+  else pprint_exp verbosity defs e
 
 let print_exp = pprint_exp_scope
-
-
-(** Remove operators/notations from expressions *)
-
-let rec elim_ops =
-  let f = elim_ops in
-  let app1 x e1 = App (Cst x, e1) in
-  let app2 x e1 e2 = App (App (Cst x, e1), e2) in
-  function
-  | Var x -> Var x
-  | Cst x -> Cst x
-  | App (e1, e2) -> App (f e1, f e2)
-  | Fun (xs, e) -> Fun  (xs, f e)
-  | Let (x, e1, e2) -> Let (x, f e1, f e2)
-  | Fix (x, xs, e) -> Fix (x, xs, f e)
-  | Tup es -> Tup (List.map f es)
-  | Op1 (op1, e1) -> app1 (name_op1 op1) (f e1)
-  | Op2 (op2, e1, e2) ->
-     begin match name_op2 op2 with
-     | Some x -> app2 x (f e1) (f e2)
-     | None -> Op2 (op2, f e1, f e2)
-     end
-  | Try (e1, e2) -> Try (f e1, f e2)
-  | Annot (s, e) -> Annot (s, f e)
 
 
 (** Instructions, parameterized by a type for possibly-generated names *)
@@ -330,15 +377,65 @@ type 'name instr =
 
 type name = Fresh of string | Normal of string
 
-let elim_ops_instrs =
+let instrs_map (f : exp -> exp) =
   List.map @@
     function
-    | Def (x, t, e, k) -> Def (x, t, elim_ops e, k)
-    | Variable (x, e) -> Variable (x, elim_ops e)
-    | Withfrom (x, y, e) -> Withfrom (x, y, elim_ops e)
-    | Inductive defs -> Inductive (List.map (fun (x, y, e) -> (x, y, elim_ops e)) defs)
+    | Def (x, t, e, k) -> Def (x, t, f e, k)
+    | Variable (x, e) -> Variable (x, f e)
+    | Withfrom (x, y, e) -> Withfrom (x, y, f e)
+    | Inductive defs -> Inductive (List.map (fun (x, y, e) -> (x, y, f e)) defs)
     | Comment s -> Comment s
     | Command s -> Command s
+
+(** Remove operators/notations from expressions *)
+
+let rec elim_ops =
+  let f = elim_ops in
+  let app1 x e1 = App (Cst x, e1) in
+  let app2 x e1 e2 = App (App (Cst x, e1), e2) in
+  function
+  | Var x -> Var x
+  | Cst x -> Cst x
+  | App (e1, e2) -> App (f e1, f e2)
+  | Fun (xs, e) -> Fun  (xs, f e)
+  | Let (x, e1, e2) -> Let (x, f e1, f e2)
+  | Fix (x, xs, e) -> Fix (x, xs, f e)
+  | Tup es -> Tup (List.map f es)
+  | Op0 o -> Op0 o
+  | Op1 (op1, e1) -> app1 (name_op1 op1) (f e1)
+  | Op2 (op2, e1, e2) ->
+     begin match name_op2 op2 with
+     | Some x -> app2 x (f e1) (f e2)
+     | None -> Op2 (op2, f e1, f e2)
+     end
+  | Try (e1, e2) -> Try (f e1, f e2)
+  | Annot (s, e) -> Annot (s, f e)
+
+let rec elim_non_ra_ops =
+  let f = elim_non_ra_ops in
+  let app1 x e1 = App (Cst x, e1) in
+  let app2 x e1 e2 = App (App (Cst x, e1), e2) in
+  function
+  | Var x -> Var x
+  | Cst x -> Cst x
+  | App (e1, e2) -> App (f e1, f e2)
+  | Fun (xs, e) -> Fun  (xs, f e)
+  | Let (x, e1, e2) -> Let (x, f e1, f e2)
+  | Fix (x, xs, e) -> Fix (x, xs, f e)
+  | Tup es -> Tup (List.map f es)
+  | Op0 o -> Op0 o
+  | Op1 (AST.ToId, e1) -> app1 (name_op1 AST.ToId) (f e1)
+  | Op1 (AST.Opt, e1) -> Op2 (Union, f e1, Op0 Id)
+  | Op1 (op1, e1) -> Op1 (op1, f e1)
+  | Op2 (Sub, e1, e2) -> Op2 (Inter, f e1, Op1 (AST.Comp, f e2))
+  | Op2 (Cartes, e1, e2) ->
+     begin match name_op2 Cartes with
+     | Some x -> app2 x (f e1) (f e2)
+     | None -> failwith "Cartes"
+     end
+  | Op2 (op2, e1, e2) -> Op2 (op2, f e1, f e2)
+  | Try (e1, e2) -> Try (f e1, f e2)
+  | Annot (s, e) -> Annot (s, f e)
 
 (** Free and defined variables mentioned in an instruction *)
 
@@ -375,9 +472,12 @@ let rel_or_set s =
   then "relation"
   else "set"
 
+let type_of_name x = App (Cst (rel_or_set x), Cst "events")
+let type_of_name_str x = pprint_exp 0 Stdlib (type_of_name x)
+
 let axioms =
   List.map
-    (fun x -> Variable (x, App (Cst (rel_or_set x), Cst "events")))
+    (fun x -> Variable (x, type_of_name x))
     candidate_fields
 
 
@@ -385,14 +485,17 @@ let axioms =
 
 let name_of_candidate = "c"
 
-let start_definitions =
+let start_definitions defs=
   [
     Variable (name_of_candidate, Cst "candidate");
-    Def ("events", None, App (Cst "events", Cst "c"), Normal_definition);
-    Command "Instance SetLike_set_events : SetLike (set events) := SetLike_set events.";
-    Command "Instance SetLike_relation_events : SetLike (relation events) := SetLike_relation events."
-  ]
-
+    Def ("events", None, App (Cst "events", Cst "c"), Normal_definition)
+  ] @
+    if defs = Ra then [] else
+      [
+        Command "Instance SetLike_set_events : SetLike (set events) := SetLike_set events.";
+        Command "Instance SetLike_relation_events : SetLike (relation events) := SetLike_relation events."
+      ]
+  
 
 (** After generated imports from candidate *)
 
@@ -401,7 +504,7 @@ let middle_definitions =
     Def ("M", None, Op2 (Union, Var "R", Var "W"), Normal_definition);
     Def ("emptyset", Some "set events", Cst "empty", Normal_definition);
     Def ("classes_loc", Some "set events -> set (set events)",
-         Cst "fun S Si => forall x y, Si x -> Si y -> loc x y",
+         Cst "fun S Si => incl Si S /\\ forall x y, Si x -> Si y -> loc x y",
          Normal_definition)
         (* TODO FIX classes_loc which is obv. wrong *)
   ]
@@ -473,6 +576,7 @@ let unknown_axiom x =
 let force_type : string -> string option =
   function
   | "toid" -> Some "relation events"
+  | "noid" -> Some "relation events"
   | _ -> None
 
 let special_cases =
@@ -486,10 +590,10 @@ let special_cases =
 
 let t = ref 0
 
-let pprint_instr verbosity (i : string instr) : string list =
+let pprint_instr verbosity defs (i : string instr) : string list =
   let opt = function None -> "" | Some s -> ": " ^ s ^ " " in
   let indent = String.make !t ' ' in
-  let pprint_exp = pprint_exp verbosity in
+  let pprint_exp = pprint_exp verbosity defs in
   match i with
   | Comment "INDENT" -> if verbosity >= 1 then t := !t + 2; []
   | Comment "DEDENT" -> if verbosity >= 1 then t := !t - 2; []
@@ -552,7 +656,7 @@ let rec translate_op2 (o : AST.op2) (es : exp list) : exp =
 
 let rec translate_op2_keep (o : AST.op2) (es : exp list) : exp =
   match o, es with
-  | AST.Union, [] -> Cst "empty"
+  | AST.Union, [] -> Op0 Empty
   | AST.Union, [e] -> e
   | AST.Union, (e :: l) -> Op2 (Union, e, (translate_op2_keep AST.Union l))
   | AST.Inter, [e1; e2] -> Op2 (Inter, e1, e2)
@@ -590,8 +694,8 @@ let rec translate_exp (e : AST.exp) : exp =
   in
   let var x = Var x in
   match e with
-  | AST.Konst (_, AST.Empty _) -> Cst "empty"
-  | AST.Konst (_, AST.Universe _) -> Cst "universal"
+  | AST.Konst (_, AST.Empty _) -> Op0 Empty
+  | AST.Konst (_, AST.Universe _) -> Op0 Universal
   | AST.Tag (_, tag) -> Cst (sprintf "Tag \"%s\"" tag)
   | AST.Var (_, x) -> var x
   | AST.Op1 (_, o, exp) -> op1 o (f exp)
@@ -616,9 +720,9 @@ let rec translate_exp (e : AST.exp) : exp =
      end
   | AST.Fun (_, pat, exp, _name, _freevars) ->
      Fun (vars_of_pat pat, f exp)
-  | AST.ExplicitSet (_, []) -> Op2 (Cast, Cst "empty", App (Cst "set", Cst "_"))
-  | AST.ExplicitSet (_, [e]) -> App (Cst "singleton", f e)
-  | AST.ExplicitSet (_, (_ :: _)) -> failwith "adding elements to lists not in the supported subset of cat"
+  | AST.ExplicitSet (_, []) -> Op2 (Cast, Cst "empty", App (Cst "set", Cst "events"))
+  | AST.ExplicitSet (_, [_])
+    | AST.ExplicitSet (_, (_ :: _)) -> failwith "adding elements to lists not in the supported subset of cat"
   | AST.Match _ -> invalid_arg "match not implemented"
   | AST.MatchSet _ -> invalid_arg "matchset not implemented"
   | AST.If _ -> invalid_arg "if"
@@ -862,6 +966,7 @@ let rec assert_notry =
   | Let (x, e1, e2) -> Let (x, f e1, f e2)
   | Fix (x, xs, e)  -> Fix (x, xs, f e)
   | Tup es          -> Tup (List.map f es)
+  | Op0 o           -> Op0 o
   | Op1 (o, e1)     -> Op1 (o, f e1)
   | Op2 (o, e1, e2) -> Op2 (o, f e1, f e2)
   | Try _           -> failwith "nested try .. with are ambiguous"
@@ -880,9 +985,10 @@ let remove_trywith defined : string instr list -> string instr list =
     | Let (x, e1, e2) -> Let (x, f e1, fnewdef [x] e2)
     | Fix (x, xs, e)  -> Fix (x, xs, fnewdef (x :: xs) e)
     | Tup es          -> Tup (List.map f es)
+    | Op0 o           -> Op0 o
     | Op1 (o, e1)     -> Op1 (o, f e1)
     | Op2 (o, e1, e2) -> Op2 (o, f e1, f e2)
-    | Try (e1, e2)    -> let s = pprint_exp 1 e in
+    | Try (e1, e2)    -> let s = pprint_exp 1 Stdlib e in
                          if subset (free_vars e1) defined
                          then Annot ("successful: "^ s, assert_notry e1)
                          else Annot ("failed: "^ s, f e2)
@@ -962,6 +1068,7 @@ let resolve_charset : string instr list -> string instr list =
   | Let (x, e1, e2) -> Let (fx x, fe e1, fe e2)
   | Fix (x, xs, e)  -> Fix (fx x, List.map fx xs, fe e)
   | Tup es          -> Tup (List.map fe es)
+  | Op0 o           -> Op0 o
   | Op1 (o, e1)     -> Op1 (o, fe e1)
   | Op2 (o, e1, e2) -> Op2 (o, fe e1, fe e2)
   | Try (e1, e2)    -> Try (fe e1, fe e2)
@@ -1073,8 +1180,8 @@ prelude nor provided by the candidate:
   |> collect_conditions
   |> remove_trywith fv
   |> (@) ondemand_definitions
-  |> fun l -> l @ [Comment ("Informations on the translation from cat to coq:\n\n"
-                            ^ String.concat "\n" !infos ^ "\n")]
+  (* |> fun l -> l @ [Comment ("Informations on the translation from cat to coq:\n\n"
+   *                           ^ String.concat "\n" !infos ^ "\n")] *)
   |> resolve_charset
 
 
@@ -1083,8 +1190,8 @@ prelude nor provided by the candidate:
 let pprint_coq_model
       (verbosity : int)
       (notation : notation)
+      (defs : definitions)
       (force_defined : string list)
-      (prelude : string list)
       (parse_file : string -> AST.t)
       (model : AST.t) : string =
   let parse fname = let (_, _, i) = parse_file fname in i in
@@ -1095,6 +1202,7 @@ let pprint_coq_model
     else imports_candidate_fields
   in
   let verb lvl x = if verbosity >= lvl then x else [] in
+  let app_if b f x = if b then f x else x in
   
   instrs
 
@@ -1116,21 +1224,34 @@ let pprint_coq_model
   |> transform_instrs force_defined
 
   (* Adding definitions *)
-  |> (fun is -> start_definitions @ intro_R_W_etc @ middle_definitions @ is)
+  |> (fun is -> start_definitions defs @ intro_R_W_etc @ middle_definitions @ is)
   
   (* Handle notations *)
-  |> (fun is -> if notation <> Non
-                then Command "Open Scope cat_scope." :: is
-                else elim_ops_instrs is)
+  |> app_if (defs = Ra) (instrs_map (elim_non_ra_ops))
+  |> app_if (notation = Non) (instrs_map (elim_ops))
+  |> app_if (notation <> Non) (fun is -> Command "Open Scope cat_scope." :: is)
 
-  (* Adding context: prelude, section, section definitions *)
-  |> (fun is ->
-    [
-      (List.map (fun s -> Command s) prelude);
-      [Command "Section Model."];
-      is;
-      [Command "End Model."];
-    ] |> List.concat)
+  (* Annotation for special cases in RA *)
+  |> app_if (defs = Ra)
+       (List.map (function
+          | Def (x, None, e, t) as i ->
+             begin match e with
+             | Op0 Empty
+               | Annot (_, Op0 Empty) ->
+                   Def (x, Some (type_of_name_str x), e, t)
+             | App (Var "domain", Op0 Empty) ->
+                   Def (x, Some "set events", e, t)
+             | _ -> i
+             end
+          | i -> i))
+  
+
+  (* Adding section *)
+  |> (fun is -> [ [Command "Section Model."]; is; [Command "End Model."]; ] |> List.concat)
+
+  |> (fun is -> Command "Require Import Cat." :: is)
+  |> app_if (defs = Ra) (fun is -> Command "From RelationAlgebra Require Import lattice prop monoid rel." :: is)
+  |> (fun is -> Command "From Coq Require Import Relations String." :: is)
 
   (* Remove unused definitions *)
   |> remove_unused ~keepalive:["events"; "witness_conditions"; "model_conditions"]
@@ -1138,6 +1259,7 @@ let pprint_coq_model
   (* Adding unfold hints *)
   |> (fun instrs ->
     let defined = filter_map (function Def (x, _, _, _) -> Some x | _ -> None) instrs in
+    let defined = if defs = Ra then defined else "SetLike_set_events" :: "SetLike_relation_events" :: defined in
     instrs @ verb 0 [Command (sprintf "\nHint Unfold %s : cat." (String.concat " " defined))])
 
   (* Add the definition of valid *)
@@ -1150,7 +1272,7 @@ let pprint_coq_model
         verb 1 [Comment ("End of translation of model " ^ name)])
 
   (* Convert to a string *)
-  |> List.map (pprint_instr verbosity)
+  |> List.map (pprint_instr verbosity defs)
   |> List.concat
   |> String.concat "\n"
 
@@ -1162,6 +1284,7 @@ let args = ref []
 let cat = ref true
 let convertfilename = ref false
 let debug = ref false
+let defs = ref Stdlib
 let force_defined = ref []
 let includes = ref []
 let makefile = ref false
@@ -1224,6 +1347,19 @@ let options =
        "<ident1>[,<ident2>[,...]]
         make try..with succeed for these
         identifiers, even if they don't appear outside a try..with\n")
+  ;
+    ("-defs",
+     Arg.String (fun s -> try defs := List.assoc s defs_names
+                          with Not_found -> failwith (sprintf "invalid defs: %s" s)),
+     sprintf
+       "%s
+        use definitions from either (default %s):
+          stdlib: the standard library
+          ra:     RelationAlgebra
+        for now, this only changes the content of Cat.v\n"
+       (String.concat "|" (List.map fst defs_names))
+       (assoc_inv !defs defs_names)
+    )
   ;
     ("-I",
      Arg.String (fun s -> includes := !includes @ [s]),
@@ -1337,13 +1473,13 @@ let normalize_filename fname =
 
 let vfilename fname = normalize_filename fname ^ ".v"
 
-let handle_filename fname prelude outchannel =
+let handle_filename fname outchannel =
   let text =
     pprint_coq_model
       !verbosity
       !notation
+      !defs
       !force_defined
-      prelude
       Parser.parse
       (Parser.parse fname)
   in
@@ -1396,7 +1532,8 @@ let () =
       printf "%s\n" usage
       |> return;
 
-    let pre = if !prelude then read_file (libfind "prelude_cat2coq.v") else [] in
+    let preludefname = match !defs with Stdlib -> "prelude_cat2coq.v" | Ra -> "prelude_cat2coq_ra.v" in
+    let pre = if !prelude then read_file (libfind preludefname) else [] in
 
     let careful_open_out filename =
       if Sys.file_exists filename && not !overwrite then
@@ -1416,20 +1553,18 @@ let () =
     in
 
     let trace fname = current_filename := Some fname; fname in
-    let import = ["From Coq Require Import Relations String.";
-                  "Require Import Cat."] in
 
     begin match !args, !quiet, !output_file with
-    | [fname], false, Some "-" -> handle_filename (trace fname) import (Some stdout)
-    | [fname], false, Some outfile -> handle_filename (trace fname) import (Some (careful_open_out outfile))
-    | [fname], true, None -> handle_filename (trace fname) import None
+    | [fname], false, Some "-" -> handle_filename (trace fname) (Some stdout)
+    | [fname], false, Some outfile -> handle_filename (trace fname) (Some (careful_open_out outfile))
+    | [fname], true, None -> handle_filename (trace fname) None
     | _, true, Some _ -> failwith "options -o and -q are incompatible"
     | _, false, Some _ -> failwith "exactly one input file must be specified \
                                     if option -o is provided"
     | fnames, _, None ->
        List.iter
          (fun fname ->
-           handle_filename (trace fname) import
+           handle_filename (trace fname)
              (if !quiet then None else Some (careful_open_out (vfilename fname))))
          fnames;
 
@@ -1464,7 +1599,7 @@ clean:
           (v files);
       end;
     end
-    
+
   with
   | Misc.Fatal errmsg
     | Failure errmsg ->
