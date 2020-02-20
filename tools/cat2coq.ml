@@ -47,8 +47,6 @@ let assoc_inv : 'b -> ('a * 'b) list -> 'a =
 
 type definitions = Stdlib | Ra (* | Atbr *)
 let defs_names = [("stdlib", Stdlib); ("ra", Ra)]
-type notation = Non | Cat | Kat (* | Atbr *)
-let notation_names = [("none", Non); ("cat", Cat); ("kat", Kat)(* ; ("atbr", Atbr) *)]
 
 let pprint_op1 : definitions -> AST.op1 -> string -> string =
   let open AST in
@@ -98,7 +96,7 @@ type op2 = Union | Seq | Inter | Sub | Cartes | Cast | And | Arr
 
 let pprint_op2 = function
   | Stdlib ->
-     begin function 
+     begin function
        | Union -> "∪"
        | Seq -> ";;"
        | Inter -> "∩"
@@ -108,7 +106,7 @@ let pprint_op2 = function
        | And -> "/\\"
        | Arr -> "->"
      end
-  | Ra -> 
+  | Ra ->
     begin function
       | Union -> "⊔"
       | Seq -> "⋅"
@@ -257,9 +255,9 @@ and abs_subst (x : string) (body : exp) (sub : exp StringMap.t) =
     (x', body', sub)
   else
     (* Otherwise, nothing to do, except removing a possible [x] from
-         the domain of [sub] *)
+       the domain of [sub] *)
     (x, body, StringMap.remove x sub)
-  
+
 (* Same thing for a sequence of variables *)
 and abs_subst_list (xs : string list) (body : exp) (sub : exp StringMap.t) =
     match xs with
@@ -359,7 +357,7 @@ let rec has_notations e : bool =
   | Tup es -> List.exists f es
 
 let pprint_exp_scope notation verbosity defs e =
-  if has_notations e && notation <> Non
+  if has_notations e && notation
   then "(" ^ pprint_exp verbosity defs e ^ ")%cat"
   else pprint_exp verbosity defs e
 
@@ -525,7 +523,7 @@ let start_definitions defs=
         Command "Instance SetLike_set_events : SetLike (set events) := SetLike_set events.";
         Command "Instance SetLike_relation_events : SetLike (relation events) := SetLike_relation events."
       ]
-  
+
 
 (** After generated imports from candidate *)
 
@@ -1172,13 +1170,13 @@ let transform_instrs force_defined (l : name instr list) : string instr list =
   let l = resolve_fresh l in
   let l = remove_withfrom l in
   let l = special_cases l in
-  
+
   let infos = ref [] in
   let add_info s = infos := !infos @ [s] in
-  
+
   let { uses; tries; _ } = naming_information l in
   let uses = of_list force_defined ++ uses in
-  
+
   (* Informing user about undefined but try-with'ed names *)
   let ambiguous = elements (diff tries uses) in
   let warning =
@@ -1203,19 +1201,19 @@ prelude nor provided by the candidate:
 "
   in
   if ondemand <> [] then add_info warning;
-  
+
   let provide = if use_axioms then unknown_axiom else unknown_def in
   let ondemand_definitions = List.map provide ondemand in
   let introduced_by_translation =
     of_list ["valid"; "witness_conditions"; "witness"; "relation_conditions"] in
-  
+
   let fv = uses
            ++ of_list candidate_fields
            ++ of_list defined_in_prelude
            ++ of_list ondemand
            ++ introduced_by_translation
   in
-  
+
   l
   |> resolve_shadowing add_info fv
   |> collect_conditions
@@ -1230,7 +1228,7 @@ prelude nor provided by the candidate:
 
 let pprint_coq_model
       (verbosity : int)
-      (notation : notation)
+      (notation : bool)
       (defs : definitions)
       (force_defined : string list)
       (parse_file : string -> AST.t)
@@ -1244,7 +1242,7 @@ let pprint_coq_model
   in
   let verb lvl x = if verbosity >= lvl then x else [] in
   let app_if b f x = if b then f x else x in
-  
+
   instrs
 
   (* We include stdlib.cat *)
@@ -1266,11 +1264,11 @@ let pprint_coq_model
 
   (* Adding definitions *)
   |> (fun is -> start_definitions defs @ intro_R_W_etc @ middle_definitions @ is)
-  
+
   (* Handle notations *)
   |> app_if (defs = Ra) (instrs_map (elim_non_ra_ops))
-  |> app_if (notation = Non) (instrs_map (elim_ops))
-  |> app_if (notation <> Non) (fun is -> Command "Open Scope cat_scope." :: is)
+  |> app_if (not notation) (instrs_map (elim_ops))
+  |> app_if (notation) (fun is -> Command "Open Scope cat_scope." :: is)
 
   (* Annotation for special cases in RA *)
   |> app_if (defs = Ra)
@@ -1285,7 +1283,6 @@ let pprint_coq_model
              | _ -> i
              end
           | i -> i))
-  
 
   (* Adding section *)
   |> (fun is -> [ [Command "Section Model."]; is; [Command "End Model."]; ] |> List.concat)
@@ -1332,7 +1329,7 @@ let defs = ref Stdlib
 let force_defined = ref []
 let includes = ref []
 let makefile = ref false
-let notation = ref Cat
+let notations = ref true
 let output_file = ref None
 let overwrite = ref false
 let prelude = ref true
@@ -1352,7 +1349,8 @@ let usage =
     (sprintf
        "Usage: %s [options]* <file.cat> [<file.cat>]*\n
         Translate .cat files into .v files, and create a Cat.v file
-        containing basic definitions, including the one of candidate.\n"
+        containing basic definitions, including the definition of
+        candidate.\n"
        prog)
   in s (* keep this let for indentation *)
 
@@ -1372,10 +1370,9 @@ let options =
      Arg.Unit (fun () -> convertfilename := true),
      sprintf
        "
-        do not read any file, simply display the filename converted
-        to a coq-compatible filename (characters in \"%s\" are mapped
-        to '_'). Note that the filenames are in the current directory,
-        which may differ from the cat file(s) directory.\n"
+        do not read any file, simply display the base filename
+        converted to a coq-compatible filename (characters in \"%s\"
+        are mapped to '_').\n"
        (String.escaped forbidden_chars)
     )
   ;
@@ -1389,8 +1386,8 @@ let options =
      Arg.String (fun s -> force_defined := split_on_char ',' s),
      sprintf
        "<ident1>[,<ident2>[,...]]
-        make try..with succeed for these
-        identifiers, even if they don't appear outside a try..with\n")
+        make try..with succeed for these identifiers, even if they
+        don't appear outside a try..with\n")
   ;
     ("-defs",
      Arg.String (fun s -> try defs := List.assoc s defs_names
@@ -1398,8 +1395,8 @@ let options =
      sprintf
        "%s
         use definitions from either (default %s):
-          stdlib: the standard library
-          ra:     RelationAlgebra
+        stdlib: the standard library
+        ra:     RelationAlgebra
         for now, this only changes the content of Cat.v\n"
        (String.concat "|" (List.map fst defs_names))
        (assoc_inv !defs defs_names)
@@ -1425,17 +1422,11 @@ let options =
        "
         do not write Cat.v\n")
   ;
-    ("-notations",
-     Arg.String (fun s -> try notation := List.assoc s notation_names
-                          with Not_found -> failwith (sprintf "invalid notation: %s" s)),
+    ("-nonotations",
+     Arg.Unit (fun () -> notations := false),
      sprintf
-       "%s
-        notation system (default %s):
-          none: define and use no notations
-          cat:  define and use notations that look like .cat files
-          kat:  import notations from the RelationAlgebra library\n"
-       (String.concat "|" (List.map fst notation_names))
-       (assoc_inv !notation notation_names)
+       "
+        do not use notations\n"
     )
   ;
     ("-noprelude",
@@ -1455,7 +1446,7 @@ let options =
     ("-overwrite",
      Arg.Unit (fun () -> overwrite := true),
      sprintf
-       "<filename>
+       "
         generated file name, - for standard output. The default is a
         coq-compatible name generated from the input filename. If this
         option is provided, only one file can be handled at a time.\n")
@@ -1521,7 +1512,7 @@ let handle_filename fname outchannel =
   let text =
     pprint_coq_model
       !verbosity
-      !notation
+      !notations
       !defs
       !force_defined
       Parser.parse
@@ -1571,9 +1562,9 @@ let () =
            "riscv-total"; "sc2"; "sc"; "sccat"; "simple-arm"; "simple-c11";
            "stdlib"; "tso"; "uni"; "uniproc"; "uniproccat";
            "uniproc-normw-cat"; "uniproc+sca"; "x86fences"; "x86tso"];
-    
+
     if !args = [] && not !yescat then
-      printf "%s\n" usage
+      printf "%s\nUse %s -help to display a list of options\n" usage prog
       |> return;
 
     let preludefname = match !defs with Stdlib -> "prelude_cat2coq.v" | Ra -> "prelude_cat2coq_ra.v" in
