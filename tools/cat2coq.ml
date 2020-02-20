@@ -296,26 +296,20 @@ let associativity defs = function
       | Ra -> NotAssociative)
   | Cartes | Cast -> NotAssociative
 
-let rec cascade_op (o : op2) : exp -> exp list =
+let rec flatten_op_tree defs (o : op2) : exp -> exp list =
+  let rightassoc = List.mem (associativity defs o) [Associative; RightAssociative] in
+  let leftassoc = List.mem (associativity defs o) [Associative; LeftAssociative] in
+  let l e = if leftassoc then flatten_op_tree defs o e else [e] in
+  let r e = if rightassoc then flatten_op_tree defs o e else [e] in
   function
-  | Op2 (o', e1, e2) when o = o' -> cascade_op o e1 @ cascade_op o e2
-  | e -> [e]
-
-let rec cascade_left_op (o : op2) : exp -> exp list =
-  function
-  | Op2 (o', e1, e2) when o = o' -> cascade_left_op o e1 @ [e2]
-  | e -> [e]
-
-let rec cascade_right_op (o : op2) : exp -> exp list =
-  function
-  | Op2 (o', e1, e2) when o = o' -> e1 :: cascade_right_op o e2
+  | Op2 (o', e1, e2) when o = o' -> l e1 @ r e2
   | e -> [e]
 
 let rec pprint_exp verbosity defs e =
   let p = pprint_exp verbosity defs in
   let ppar e = match e with
     | Var x | Cst x -> x
-    | Op1 (AST.ToId, _) -> p e
+    | Op0 _ | Op1 (AST.ToId, _) -> p e
     | _ -> "(" ^ p e ^ ")"
   in
   let open String in
@@ -325,20 +319,11 @@ let rec pprint_exp verbosity defs e =
   | App (App (e1, e2), e3) -> ppar e1 ^ " " ^ ppar e2 ^ " " ^ ppar e3
   | App (e1, Tup es) -> ppar e1 ^ " " ^ concat " " (List.map ppar es)
   | App (e1, e2) -> ppar e1 ^ " " ^ ppar e2
-  | Op0 o -> pprint_op0 o
+  | Op0 o -> (match defs with Ra -> pprint_op0_ra | Stdlib -> pprint_op0) o
   | Op1 (o, e1) -> pprint_op1 defs o (ppar e1)
-  | Op2 (o, e1, e2) ->
-     (* TODO after testing is set up: factor all this*)
-     begin match associativity defs o with
-     | Associative ->
-        concat (" " ^ pprint_op2 defs o ^ " ") (List.map ppar (e1 :: cascade_op o e2))
-     | RightAssociative ->
-        concat (" " ^ pprint_op2 defs o ^ " ") (List.map ppar (e1 :: cascade_right_op o e2))
-     | LeftAssociative ->
-        concat (" " ^ pprint_op2 defs o ^ " ") (List.map ppar (cascade_left_op o e1 @ [e2]))
-     | NotAssociative ->
-       sprintf "%s %s %s" (ppar e1) (pprint_op2 defs o) (ppar e2)
-     end
+  | Op2 (o, _, _) -> concat
+                       (" " ^ pprint_op2 defs o ^ " ")
+                       (List.map ppar (flatten_op_tree defs o e))
   | Tup l -> "(" ^ (concat ", " (List.map p l)) ^ ")"
   | Fun (xs, e) -> sprintf "fun %s => %s" (concat " " xs) (p e)
   | Fix (f, xs, body) -> sprintf "fix %s %s := %s" f (concat " " xs) (p body)
@@ -668,7 +653,7 @@ let translate_op1_keep (o : AST.op1) e =
 let rec translate_op2 (o : AST.op2) (es : exp list) : exp =
   let app2 x e1 e2 = App (App (Cst x, e1), e2) in
   match o, es with
-  | AST.Union, [] -> Cst "empty"
+  | AST.Union, [] -> Op0 Empty
   | AST.Union, [e] -> e
   | AST.Union, (e :: l) -> app2 "union" e (translate_op2 AST.Union l)
   | AST.Inter, [e1; e2] -> app2 "intersection" e1 e2
@@ -748,7 +733,7 @@ let rec translate_exp (e : AST.exp) : exp =
      end
   | AST.Fun (_, pat, exp, _name, _freevars) ->
      Fun (vars_of_pat pat, f exp)
-  | AST.ExplicitSet (_, []) -> Op2 (Cast, Cst "empty", App (Cst "set", Cst "events"))
+  | AST.ExplicitSet (_, []) -> Var "emptyset" (* defined in stdlib.cat *)
   | AST.ExplicitSet (_, [_])
     | AST.ExplicitSet (_, (_ :: _)) -> failwith "adding elements to lists not in the supported subset of cat"
   | AST.Match _ -> invalid_arg "match not implemented"
@@ -1011,7 +996,7 @@ let rec assert_notry =
   | Try _           -> failwith "nested try .. with are ambiguous"
   | Annot (s, e)    -> Annot (s, f e)
 
-let remove_trywith defined : string instr list -> string instr list =
+let remove_trywith defs defined : string instr list -> string instr list =
   let open StringSet in
   let rec rmtry defined (e : exp) : exp =
     let f = rmtry defined in
@@ -1027,7 +1012,7 @@ let remove_trywith defined : string instr list -> string instr list =
     | Op0 o           -> Op0 o
     | Op1 (o, e1)     -> Op1 (o, f e1)
     | Op2 (o, e1, e2) -> Op2 (o, f e1, f e2)
-    | Try (e1, e2)    -> let s = pprint_exp 1 Stdlib e in
+    | Try (e1, e2)    -> let s = pprint_exp 1 defs e in
                          if subset (free_vars e1) defined
                          then Annot ("successful: "^ s, assert_notry e1)
                          else Annot ("failed: "^ s, f e2)
@@ -1164,7 +1149,7 @@ let naming_information (instructions : string instr list) : naming =
 
 let use_axioms = false
 
-let transform_instrs force_defined (l : name instr list) : string instr list =
+let transform_instrs force_defined defs (l : name instr list) : string instr list =
   let open StringSet in
   let ( ++ ) = union in
   let l = resolve_fresh l in
@@ -1217,7 +1202,7 @@ prelude nor provided by the candidate:
   l
   |> resolve_shadowing add_info fv
   |> collect_conditions
-  |> remove_trywith fv
+  |> remove_trywith defs fv
   |> (@) ondemand_definitions
   (* |> fun l -> l @ [Comment ("Informations on the translation from cat to coq:\n\n"
    *                           ^ String.concat "\n" !infos ^ "\n")] *)
@@ -1260,7 +1245,7 @@ let pprint_coq_model
   (* Core transformations *)
   (* TODO: maybe -- but only maybe -- some of those transformations
      would benefit from being done after elimination of unused *)
-  |> transform_instrs force_defined
+  |> transform_instrs force_defined defs
 
   (* Adding definitions *)
   |> (fun is -> start_definitions defs @ intro_R_W_etc @ middle_definitions @ is)
