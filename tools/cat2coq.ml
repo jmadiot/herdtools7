@@ -274,15 +274,49 @@ let subst_with_var (sub : string StringMap.t) : exp -> exp =
 
 (** Pretty-printing, with aggressive currying *)
 
+let level_op1 =
+  let open AST in
+  function
+  | Stdlib ->
+     begin function
+       | Inv -> 30
+       | Comp -> 75
+       | ToId -> 1
+       | Plus -> 30
+       | Star -> 30
+       | Opt -> 30
+     end
+  | Ra ->
+     begin function
+       | Inv -> 5
+       | Comp -> 20
+       | ToId | Opt -> invalid_arg "level_op1: not an RA operator"
+       | Plus -> 5
+       | Star -> 5
+     end
+
 let level_op2 = function
-  | Union -> 70
-  | Seq -> 55
-  | Inter -> 51
-  | Sub -> 45
-  | Cartes -> 40
-  | Cast -> 2
-  | And -> 80
-  | Arr -> 99
+  | Stdlib ->
+     begin function
+       | Union -> 70
+       | Seq -> 55
+       | Inter -> 51
+       | Sub -> 45
+       | Cartes -> 40
+       | Cast -> 2
+       | And -> 80
+       | Arr -> 99
+     end
+  | Ra ->
+     begin function
+       | Union -> 50
+       | Seq -> 25
+       | Inter -> 40
+       | Sub | Cartes -> invalid_arg "level_op2: not an RA operator"
+       | Cast -> 2
+       | And -> 80
+       | Arr -> 99
+     end
 
 type associativity = Associative | LeftAssociative | RightAssociative | NotAssociative
 
@@ -307,23 +341,28 @@ let rec flatten_op_tree defs (o : op2) : exp -> exp list =
 
 let rec pprint_exp verbosity defs e =
   let p = pprint_exp verbosity defs in
-  let ppar e = match e with
-    | Var x | Cst x -> x
-    | Op0 _ | Op1 (AST.ToId, _) -> p e
+  let ppar lvl e = match e with
+    | Var _
+      | Cst _
+      | Op0 _
+      -> p e
+    | App (_, _) when 10 < lvl -> p e
+    | Op1 (o, _) when level_op1 defs o < lvl -> p e
+    | Op2 (o, _, _) when level_op2 defs o < lvl -> p e
     | _ -> "(" ^ p e ^ ")"
   in
   let open String in
   match e with
   | Var x -> x
   | Cst s -> s
-  | App (App (e1, e2), e3) -> ppar e1 ^ " " ^ ppar e2 ^ " " ^ ppar e3
-  | App (e1, Tup es) -> ppar e1 ^ " " ^ concat " " (List.map ppar es)
-  | App (e1, e2) -> ppar e1 ^ " " ^ ppar e2
+  | App (App (e1, e2), e3) -> ppar 10 e1 ^ " " ^ ppar 10 e2 ^ " " ^ ppar 10 e3
+  | App (e1, Tup es) -> ppar 10 e1 ^ " " ^ concat " " (List.map (ppar 10) es)
+  | App (e1, e2) -> ppar 10 e1 ^ " " ^ ppar 10 e2
   | Op0 o -> (match defs with Ra -> pprint_op0_ra | Stdlib -> pprint_op0) o
-  | Op1 (o, e1) -> pprint_op1 defs o (ppar e1)
+  | Op1 (o, e1) -> pprint_op1 defs o (ppar (level_op1 defs o) e1)
   | Op2 (o, _, _) -> concat
                        (" " ^ pprint_op2 defs o ^ " ")
-                       (List.map ppar (flatten_op_tree defs o e))
+                       (List.map (ppar (level_op2 defs o)) (flatten_op_tree defs o e))
   | Tup l -> "(" ^ (concat ", " (List.map p l)) ^ ")"
   | Fun (xs, e) -> sprintf "fun %s => %s" (concat " " xs) (p e)
   | Fix (f, xs, body) -> sprintf "fix %s %s := %s" f (concat " " xs) (p body)
