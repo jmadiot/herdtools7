@@ -318,29 +318,39 @@ let level_op2 = function
        | Arr -> 99
      end
 
+type printing_options = {
+    aggressive_assoc : bool;
+    defs : definitions;
+    notations : bool;
+    verbosity : int;
+    force_defined : string list;
+  }
+
 type associativity = Associative | LeftAssociative | RightAssociative | NotAssociative
 
-let associativity defs = function
-  | Union | Seq | Inter -> Associative
-  | And -> Associative
+let associativity options = function
+  | Union | Seq | Inter | And when options.aggressive_assoc -> Associative
+  | Union | Seq | Inter -> if options.defs = Ra then LeftAssociative else RightAssociative
+  | And -> LeftAssociative
   | Arr -> RightAssociative
   | Sub ->
-     (match defs with
+     (match options.defs with
       | Stdlib -> LeftAssociative
       | Ra -> NotAssociative)
   | Cartes | Cast -> NotAssociative
 
-let rec flatten_op_tree defs (o : op2) : exp -> exp list =
-  let rightassoc = List.mem (associativity defs o) [Associative; RightAssociative] in
-  let leftassoc = List.mem (associativity defs o) [Associative; LeftAssociative] in
-  let l e = if leftassoc then flatten_op_tree defs o e else [e] in
-  let r e = if rightassoc then flatten_op_tree defs o e else [e] in
+let rec flatten_op_tree options (o : op2) : exp -> exp list =
+  let rightassoc = List.mem (associativity options o) [Associative; RightAssociative] in
+  let leftassoc = List.mem (associativity options o) [Associative; LeftAssociative] in
+  let l e = if leftassoc then flatten_op_tree options o e else [e] in
+  let r e = if rightassoc then flatten_op_tree options o e else [e] in
   function
   | Op2 (o', e1, e2) when o = o' -> l e1 @ r e2
   | e -> [e]
 
-let rec pprint_exp verbosity defs e =
-  let p = pprint_exp verbosity defs in
+let rec pprint_exp options e =
+  let p = pprint_exp options in
+  let { defs } = options in
   let ppar lvl e = match e with
     | Var _
       | Cst _
@@ -362,12 +372,12 @@ let rec pprint_exp verbosity defs e =
   | Op1 (o, e1) -> pprint_op1 defs o (ppar (level_op1 defs o) e1)
   | Op2 (o, _, _) -> concat
                        (" " ^ pprint_op2 defs o ^ " ")
-                       (List.map (ppar (level_op2 defs o)) (flatten_op_tree defs o e))
+                       (List.map (ppar (level_op2 defs o)) (flatten_op_tree options o e))
   | Tup l -> "(" ^ (concat ", " (List.map p l)) ^ ")"
   | Fun (xs, e) -> sprintf "fun %s => %s" (concat " " xs) (p e)
   | Fix (f, xs, body) -> sprintf "fix %s %s := %s" f (concat " " xs) (p body)
   | Let (x, e1, e2) -> sprintf "let %s := %s in %s" x (p e1) (p e2)
-  | Annot (_, e) when verbosity <= 0 -> p e
+  | Annot (_, e) when options.verbosity <= 0 -> p e
   | Annot (comment, e) -> sprintf "(*%s*) %s" comment (p e)
   | Try (e1, e2) -> sprintf "try %s with %s" (p e1) (p e2)
 
@@ -380,12 +390,12 @@ let rec has_notations e : bool =
   | App (e1, e2) | Let (_, e1, e2) | Try (e1, e2) -> f e1 || f e2
   | Tup es -> List.exists f es
 
-let pprint_exp_scope notation verbosity defs e =
-  if has_notations e && notation
-  then "(" ^ pprint_exp verbosity defs e ^ ")%cat"
-  else pprint_exp verbosity defs e
+let pprint_exp_scope options e =
+  if has_notations e && options.notations
+  then "(" ^ pprint_exp options e ^ ")%cat"
+  else pprint_exp options e
 
-let print_exp = pprint_exp_scope
+(* let print_exp = pprint_exp_scope *)
 
 
 (** Instructions, parameterized by a type for possibly-generated names *)
@@ -525,7 +535,7 @@ let rel_or_set s =
   else "set"
 
 let type_of_name x = App (Cst (rel_or_set x), Cst "events")
-let type_of_name_str x = pprint_exp 0 Stdlib (type_of_name x)
+let type_of_name_str options x = pprint_exp options (type_of_name x)
 
 let axioms =
   List.map
@@ -642,14 +652,14 @@ let special_cases =
 
 let t = ref 0
 
-let pprint_instr verbosity defs (i : string instr) : string list =
+let pprint_instr options (i : string instr) : string list =
   let opt = function None -> "" | Some s -> ": " ^ s ^ " " in
   let indent = String.make !t ' ' in
-  let pprint_exp = pprint_exp verbosity defs in
+  let pprint_exp = pprint_exp options in
   match i with
-  | Comment "INDENT" -> if verbosity >= 1 then t := !t + 2; []
-  | Comment "DEDENT" -> if verbosity >= 1 then t := !t - 2; []
-  | Comment _ when verbosity <= 0 -> []
+  | Comment "INDENT" -> if options.verbosity >= 1 then t := !t + 2; []
+  | Comment "DEDENT" -> if options.verbosity >= 1 then t := !t - 2; []
+  | Comment _ when options.verbosity <= 0 -> []
   | _ ->
      [indent ^
        match i with
@@ -1035,7 +1045,7 @@ let rec assert_notry =
   | Try _           -> failwith "nested try .. with are ambiguous"
   | Annot (s, e)    -> Annot (s, f e)
 
-let remove_trywith defs defined : string instr list -> string instr list =
+let remove_trywith options defined : string instr list -> string instr list =
   let open StringSet in
   let rec rmtry defined (e : exp) : exp =
     let f = rmtry defined in
@@ -1051,7 +1061,7 @@ let remove_trywith defs defined : string instr list -> string instr list =
     | Op0 o           -> Op0 o
     | Op1 (o, e1)     -> Op1 (o, f e1)
     | Op2 (o, e1, e2) -> Op2 (o, f e1, f e2)
-    | Try (e1, e2)    -> let s = pprint_exp 1 defs e in
+    | Try (e1, e2)    -> let s = pprint_exp options e in
                          if subset (free_vars e1) defined
                          then Annot ("successful: "^ s, assert_notry e1)
                          else Annot ("failed: "^ s, f e2)
@@ -1188,7 +1198,8 @@ let naming_information (instructions : string instr list) : naming =
 
 let use_axioms = false
 
-let transform_instrs force_defined defs (l : name instr list) : string instr list =
+let transform_instrs options (l : name instr list) : string instr list =
+  let { force_defined } = options in
   let open StringSet in
   let ( ++ ) = union in
   let l = resolve_fresh l in
@@ -1241,7 +1252,7 @@ prelude nor provided by the candidate:
   l
   |> resolve_shadowing add_info fv
   |> collect_conditions
-  |> remove_trywith defs fv
+  |> remove_trywith options fv
   |> (@) ondemand_definitions
   (* |> fun l -> l @ [Comment ("Informations on the translation from cat to coq:\n\n"
    *                           ^ String.concat "\n" !infos ^ "\n")] *)
@@ -1251,10 +1262,7 @@ prelude nor provided by the candidate:
 (** Print model in Coq syntax *)
 
 let pprint_coq_model
-      (verbosity : int)
-      (notation : bool)
-      (defs : definitions)
-      (force_defined : string list)
+      (options : printing_options)
       (parse_file : string -> AST.t)
       (model : AST.t) : string =
   let parse fname = let (_, _, i) = parse_file fname in i in
@@ -1264,7 +1272,7 @@ let pprint_coq_model
     then axioms
     else imports_candidate_fields
   in
-  let verb lvl x = if verbosity >= lvl then x else [] in
+  let verb lvl x = if options.verbosity >= lvl then x else [] in
   let app_if b f x = if b then f x else x in
 
   instrs
@@ -1284,24 +1292,27 @@ let pprint_coq_model
   (* Core transformations *)
   (* TODO: maybe -- but only maybe -- some of those transformations
      would benefit from being done after elimination of unused *)
-  |> transform_instrs force_defined defs
+  |> transform_instrs options
 
   (* Adding definitions *)
-  |> (fun is -> start_definitions defs @ intro_R_W_etc @ middle_definitions @ is)
+  |> (fun is -> start_definitions options.defs @ intro_R_W_etc @ middle_definitions @ is)
+
+  (* Inline some definitions *)
+  |> some_inlining
 
   (* Handle notations *)
-  |> app_if (defs = Ra) (instrs_map (elim_non_ra_ops))
-  |> app_if (not notation) (instrs_map (elim_ops))
-  |> app_if (notation) (fun is -> Command "Open Scope cat_scope." :: is)
+  |> app_if (options.defs = Ra) (instrs_map (elim_non_ra_ops))
+  |> app_if (not options.notations) (instrs_map (elim_ops))
+  |> app_if (true || options.notations) (fun is -> Command "Open Scope cat_scope." :: is)
 
   (* Annotation for special cases in RA *)
-  |> app_if (defs = Ra)
+  |> app_if (options.defs = Ra)
        (List.map (function
           | Def (x, None, e, t) as i ->
              begin match e with
              | Op0 Empty
                | Annot (_, Op0 Empty) ->
-                   Def (x, Some (type_of_name_str x), e, t)
+                   Def (x, Some (type_of_name_str options x), e, t)
              | App (Var "domain", Op0 Empty) ->
                    Def (x, Some "set events", e, t)
              | _ -> i
@@ -1312,19 +1323,16 @@ let pprint_coq_model
   |> (fun is -> [ [Command "Section Model."]; is; [Command "End Model."]; ] |> List.concat)
 
   |> (fun is -> Command "Require Import Cat." :: is)
-  |> app_if (defs = Ra) (fun is -> Command "From RelationAlgebra Require Import lattice prop monoid rel." :: is)
+  |> app_if (options.defs = Ra) (fun is -> Command "From RelationAlgebra Require Import lattice prop monoid rel." :: is)
   |> (fun is -> Command "From Coq Require Import Relations String." :: is)
 
   (* Remove unused definitions *)
   |> remove_unused ~keepalive:["events"; "witness_conditions"; "model_conditions"]
 
-  (* Inline some definitions *)
-  |> some_inlining
-
   (* Adding unfold hints *)
   |> (fun instrs ->
     let defined = filter_map (function Def (x, _, _, _) -> Some x | _ -> None) instrs in
-    let defined = if defs = Ra then defined else "SetLike_set_events" :: "SetLike_relation_events" :: defined in
+    let defined = if options.defs = Ra then defined else "SetLike_set_events" :: "SetLike_relation_events" :: defined in
     instrs @ verb 0 [Command (sprintf "\nHint Unfold %s : cat." (String.concat " " defined))])
 
   (* Add the definition of valid *)
@@ -1337,7 +1345,7 @@ let pprint_coq_model
         verb 1 [Comment ("End of translation of model " ^ name)])
 
   (* Convert to a string *)
-  |> List.map (pprint_instr verbosity defs)
+  |> List.map (pprint_instr options)
   |> List.concat
   |> String.concat "\n"
 
@@ -1356,6 +1364,7 @@ let makefile = ref false
 let notations = ref true
 let output_file = ref None
 let overwrite = ref false
+let prefix = ref ""
 let prelude = ref true
 let quiet = ref false
 let verbosity = ref 1
@@ -1475,6 +1484,14 @@ let options =
         coq-compatible name generated from the input filename. If this
         option is provided, only one file can be handled at a time.\n")
   ;
+    ("-prefix",
+     Arg.String (fun s -> prefix := s),
+     sprintf
+       "<string>
+        add a prefix to generated files' names, except Cat.v, but
+        including the Makefile. Adapt the content of Makefile and
+        importeverything.v accordingly.\n")
+  ;
     ("-q",
      Arg.Unit (fun () -> quiet := true),
      sprintf
@@ -1533,12 +1550,16 @@ let normalize_filename fname =
 let vfilename fname = normalize_filename fname ^ ".v"
 
 let handle_filename fname outchannel =
+  let printing_options =
+    { aggressive_assoc = false;
+      verbosity = !verbosity;
+      notations = !notations;
+      defs = !defs;
+      force_defined = !force_defined }
+  in
   let text =
     pprint_coq_model
-      !verbosity
-      !notations
-      !defs
-      !force_defined
+      printing_options
       Parser.parse
       (Parser.parse fname)
   in
@@ -1612,10 +1633,11 @@ let () =
     in
 
     let trace fname = current_filename := Some fname; fname in
+    let pre fname = !prefix ^ fname in
 
     begin match !args, !quiet, !output_file with
     | [fname], false, Some "-" -> handle_filename (trace fname) (Some stdout)
-    | [fname], false, Some outfile -> handle_filename (trace fname) (Some (careful_open_out outfile))
+    | [fname], false, Some outfile -> handle_filename (trace fname) (Some (careful_open_out (pre outfile)))
     | [fname], true, None -> handle_filename (trace fname) None
     | _, true, Some _ -> failwith "options -o and -q are incompatible"
     | _, false, Some _ -> failwith "exactly one input file must be specified \
@@ -1624,30 +1646,30 @@ let () =
        List.iter
          (fun fname ->
            handle_filename (trace fname)
-             (if !quiet then None else Some (careful_open_out (vfilename fname))))
+             (if !quiet then None else Some (careful_open_out (pre (vfilename fname)))))
          fnames;
 
     if !makefile then begin
         let fnames = List.sort compare fnames in
         let files = List.map normalize_filename fnames in
-        let v l = String.concat " " (List.map (fun x -> x ^ ".v") l) in
+        let v l = String.concat " " (List.map (fun x -> pre (x ^ ".v")) l) in
 
-        let o = careful_open_out "importeverything.v" in
+        let o = careful_open_out (pre "importeverything.v") in
         fprintf o "Require Import Cat Relations.\n";
-        fprintf o "Require %s.\n\n" (String.concat " " files);
-        List.iter (fprintf o "Check %s.valid.\n") files;
+        fprintf o "Require %s.\n\n" (String.concat " " (List.map pre files));
+        List.(iter (fprintf o "Check %s.valid.\n") (map pre files));
         close_out o;
 
-        let o = careful_open_out "Makefile" in
+        let o = careful_open_out (pre "Makefile") in
         fprintf o "
 cat_vs=%s
 
 cat_vos=$(cat_vs:=o)
 
-all_vos=$(cat_vos) Cat.vo importeverything.vo
+all_vos=$(cat_vos) Cat.vo %simporteverything.vo
 
 all: $(all_vos)
-importeverything.vo: $(cat_vos)
+%simporteverything.vo: $(cat_vos)
 $(cat_vos): Cat.vo
 
 %%.vo: %%.v
@@ -1655,7 +1677,7 @@ $(cat_vos): Cat.vo
 clean:
 	rm -f $(all_vos) $(all_vos:vo=glob)
 "
-          (v files);
+          (v files) !prefix !prefix;
       end;
     end
 
