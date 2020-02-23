@@ -133,7 +133,7 @@ type exp =
   | Var of string
   | Cst of string (* non-substitutable variable *)
   | App of exp * exp
-  | Fun of string list * exp
+  | Fun of (string * string option) list * exp
   | Let of string * exp * exp
   | Fix of string * string list * exp
   | Tup of exp list
@@ -151,9 +151,9 @@ let rec free_vars : exp -> StringSet.t =
   | Var x -> singleton x
   | Cst x -> singleton x
   | App (e1, e2) -> f e1 + f e2
-  | Fun (xs, e) -> List.fold_right remove xs (f e)
+  | Fun (xs, e) -> List.fold_right remove (List.map fst xs) (f e)
   | Let (x, e1, e2) -> f e1 + remove x (f e2)
-  | Fix (x, xs, e) -> f (Fun (x :: xs, e))
+  | Fix (x, xs, e) -> unions (List.map singleton (x :: xs)) + f e
   | Tup es -> unions (List.map f es)
   | Op0 _ -> empty
   | Op1 (_, e1) -> f e1
@@ -172,9 +172,9 @@ let rec tried_vars : exp -> StringSet.t =
   | Var _ -> empty
   | Cst _ -> empty
   | App (e1, e2) -> f e1 + f e2
-  | Fun (xs, e) -> List.fold_right remove xs (f e)
+  | Fun (xs, e) -> List.fold_right remove (List.map fst xs) (f e)
   | Let (x, e1, e2) -> f e1 + remove x (f e2)
-  | Fix (x, xs, e) -> f (Fun (x :: xs, e))
+  | Fix (x, xs, e) -> unions (List.map singleton (x :: xs)) + f e
   | Tup es -> unions (List.map f es)
   | Op0 _ -> empty
   | Op1 (_, e1) -> f e1
@@ -193,9 +193,9 @@ let rec used_vars : exp -> StringSet.t =
   | Var x -> singleton x
   | Cst _ -> empty
   | App (e1, e2) -> f e1 + f e2
-  | Fun (xs, e) -> List.fold_right remove xs (f e)
+  | Fun (xs, e) -> List.fold_right remove (List.map fst xs) (f e)
   | Let (x, e1, e2) -> f e1 + remove x (f e2)
-  | Fix (x, xs, e) -> f (Fun (x :: xs, e))
+  | Fix (x, xs, e) -> unions (List.map singleton (x :: xs)) + f e
   | Tup es -> unions (List.map f es)
   | Op0 _ -> empty
   | Op1 (_, e1) -> f e1
@@ -225,8 +225,9 @@ let rec subst (sub : exp StringMap.t) : exp -> exp =
   | Var x           -> StringMap.safe_find (Var x) x sub
   | Cst s           -> Cst s
   | App (e1, e2)    -> App (subst sub e1, subst sub e2)
-  | Fun (xs, e)     -> let (xs, e, sub) = abs_subst_list xs e sub in
-                       Fun(xs, subst sub e)
+  | Fun (xs, e)     -> let xs, tys = List.split xs in
+                       let (xs, e, sub) = abs_subst_list xs e sub in
+                       Fun (List.combine xs tys, subst sub e)
   | Let (x, e1, e2) -> let e1 = subst sub e1 in (* x not binding in e1 *)
                        let (x, e2, sub) = abs_subst x e2 sub in
                        Let (x, e1, subst sub e2)
@@ -312,18 +313,21 @@ let level_op2 = function
        | Union -> 50
        | Seq -> 25
        | Inter -> 40
-       | Sub | Cartes -> invalid_arg "level_op2: not an RA operator"
+       | Sub -> invalid_arg "level_op2: Sub is not an RA operator"
+       | Cartes -> invalid_arg "level_op2: Cartes is not an RA operator"
        | Cast -> 2
        | And -> 80
        | Arr -> 99
      end
 
-type printing_options = {
+type options = {
     aggressive_assoc : bool;
     defs : definitions;
+    force_defined : string list;
+    keep : string list;
+    keep_unused : bool;
     notations : bool;
     verbosity : int;
-    force_defined : string list;
   }
 
 type associativity = Associative | LeftAssociative | RightAssociative | NotAssociative
@@ -347,6 +351,12 @@ let rec flatten_op_tree options (o : op2) : exp -> exp list =
   function
   | Op2 (o', e1, e2) when o = o' -> l e1 @ r e2
   | e -> [e]
+
+let pp_annot =
+  List.map
+    (function
+     | x, None -> x
+     | x, Some ty -> sprintf "(%s : %s)" x ty)
 
 let rec pprint_exp options e =
   let p = pprint_exp options in
@@ -374,7 +384,7 @@ let rec pprint_exp options e =
                        (" " ^ pprint_op2 defs o ^ " ")
                        (List.map (ppar (level_op2 defs o)) (flatten_op_tree options o e))
   | Tup l -> "(" ^ (concat ", " (List.map p l)) ^ ")"
-  | Fun (xs, e) -> sprintf "fun %s => %s" (concat " " xs) (p e)
+  | Fun (xs, e) -> sprintf "fun %s => %s" (concat " " (pp_annot xs)) (p e)
   | Fix (f, xs, body) -> sprintf "fix %s %s := %s" f (concat " " xs) (p body)
   | Let (x, e1, e2) -> sprintf "let %s := %s in %s" x (p e1) (p e2)
   | Annot (_, e) when options.verbosity <= 0 -> p e
@@ -401,10 +411,13 @@ let pprint_exp_scope options e =
 (** Instructions, parameterized by a type for possibly-generated names *)
 
 type definition_kind = Normal_definition | Test_definition | Condition
+type variable_kind =
+  | Rel (* relation variable, such as co, mo, loLL, ... *)
+  | Scheme (* variable used inside a subsection, used for scheme definition *)
 
 type 'name instr =
   | Def of 'name * string option (* possible type annotation*) * exp * definition_kind
-  | Variable of 'name * exp (* section variable *)
+  | Variable of 'name * exp (* section variable *) * variable_kind
   | Inductive of (string * 'name * exp) list
   | Withfrom of string * 'name * exp
   | Comment of string
@@ -416,7 +429,7 @@ let instrs_map (f : exp -> exp) =
   List.map @@
     function
     | Def (x, t, e, k) -> Def (x, t, f e, k)
-    | Variable (x, e) -> Variable (x, f e)
+    | Variable (x, e, k) -> Variable (x, f e,k)
     | Withfrom (x, y, e) -> Withfrom (x, y, f e)
     | Inductive defs -> Inductive (List.map (fun (x, y, e) -> (x, y, f e)) defs)
     | Comment s -> Comment s
@@ -434,13 +447,13 @@ let rec instrs_subst (sub : exp StringMap.t) : string instr list -> string instr
      shadowing *)
   function
   | [] -> []
-  | (Def (x, _, _, _) | Variable (x, _)) :: _ when mem x fv_sub -> err ()
+  | (Def (x, _, _, _) | Variable (x, _, _)) :: _ when mem x fv_sub -> err ()
   | Withfrom (x, y, _) :: _ when clash [x; y] fv_sub -> err ()
   | Inductive defs :: _ when clash (list_bind defs (fun (x, y, _) -> [x; y])) fv_sub -> err ()
   | Def (x, t, e, k) :: is ->
      Def (x, t, subst sub e, k) :: instrs_subst (rm [x] sub) is
-  | Variable (x, e) :: is ->
-     Variable (x, subst sub e) :: instrs_subst (rm [x] sub) is
+  | Variable (x, e, k) :: is ->
+     Variable (x, subst sub e, k) :: instrs_subst (rm [x] sub) is
   | Withfrom (x, y, e) :: is ->
      Withfrom (x, y, subst sub e) :: instrs_subst (rm [x;y] sub) is
   | Inductive defs :: is ->
@@ -507,7 +520,7 @@ let free_vars_of_instr (fv: 'a -> string list) : 'a instr -> StringSet.t =
   (* let (+) s = function Normal x -> add x s | Fresh _ -> s in *)
   function
   | Def (x, _, e, _) -> fv x + free_vars e
-  | Variable (x, e) -> fv x + free_vars e
+  | Variable (x, e, _) -> fv x + free_vars e
   | Inductive defs ->
      unions (List.map (fun (x, y, e) -> [x] + (fv y + free_vars e)) defs)
   | Withfrom (x, y, e) -> [x] + (fv y + free_vars e)
@@ -539,7 +552,7 @@ let type_of_name_str options x = pprint_exp options (type_of_name x)
 
 let axioms =
   List.map
-    (fun x -> Variable (x, type_of_name x))
+    (fun x -> Variable (x, type_of_name x, Rel))
     candidate_fields
 
 
@@ -549,7 +562,7 @@ let name_of_candidate = "c"
 
 let start_definitions defs=
   [
-    Variable (name_of_candidate, Cst "candidate");
+    Variable (name_of_candidate, Cst "candidate", Rel);
     Def ("events", None, App (Cst "events", Cst "c"), Normal_definition)
   ] @
     if defs = Ra then [] else
@@ -576,7 +589,7 @@ let middle_definitions =
 
 let end_text instrs =
   let all_axiom_relations =
-    filter_map (function Variable (x, _) -> Some x | _ -> None) instrs
+    filter_map (function Variable (x, _, Rel) -> Some x | _ -> None) instrs
     |> List.filter ((<>) name_of_candidate)
   in
   let empty_witness_cond =
@@ -629,7 +642,7 @@ let unknown_def x =
        Normal_definition)
 
 let unknown_axiom x =
-  Variable (x, App (Cst (rel_or_set x), Cst "events"))
+  Variable (x, App (Cst (rel_or_set x), Cst "events"), Rel)
 
 
 (** Type annotations for cases for which Cst fails at inference. This
@@ -667,14 +680,14 @@ let pprint_instr options (i : string instr) : string list =
        | Command s -> s
        | Def (x, ty, Fun (xs, e), _) ->
           sprintf "Definition %s %s %s:= %s."
-            x (String.concat " " xs) (opt ty) (pprint_exp e)
+            x (String.concat " " (pp_annot xs)) (opt ty) (pprint_exp e)
        | Def (x, ty, e, _) -> sprintf "Definition %s %s:= %s." x (opt ty) (pprint_exp e)
-       | Variable (x, e) -> sprintf "Variable %s : %s." x (pprint_exp e)
+       | Variable (x, e, _) -> sprintf "Variable %s : %s." x (pprint_exp e)
        | Inductive defs ->
           let f (x, cx, e) =
             sprintf "%s : relation _ := %s : incl (%s) %s" x cx (pprint_exp e) x
           in sprintf "Inductive %s."
-               (String.concat ("\n" ^ indent ^ "  with ")
+               (String.concat ("\n" ^ indent ^ "     with ")
                   (List.map f defs))
        | Withfrom _ ->
           invalid_arg "withfroms should have been eliminated before"
@@ -781,7 +794,7 @@ let rec translate_exp (e : AST.exp) : exp =
      | [(_, AST.Pvar _, _)] -> invalid_arg "let rec in with no argument"
      end
   | AST.Fun (_, pat, exp, _name, _freevars) ->
-     Fun (vars_of_pat pat, f exp)
+     Fun (List.map (fun x -> (x, None)) (vars_of_pat pat), f exp)
   | AST.ExplicitSet (_, []) -> Var "emptyset" (* defined in stdlib.cat *)
   | AST.ExplicitSet (_, [_])
     | AST.ExplicitSet (_, (_ :: _)) -> failwith "adding elements to lists not in the supported subset of cat"
@@ -815,14 +828,15 @@ let rec expand_include parse_file is =
 
 (** Remove unused definitions (lib/AST's syntax)*)
 
-let filter_unused_defs instrs =
+let filter_unused_defs needed instrs =
   let test_exps = filter_map
                 (function AST.Test ((_, _, _, e, _), _) -> Some e | _ -> None)
                 instrs
   in
+  let needed = StringSet.unions (List.map StringSet.singleton needed) in
   let concat = List.fold_left StringSet.union StringSet.empty in
   let vars_of_exps list = concat @@ List.map (ASTUtils.free_body []) list in
-  let needed = ref (vars_of_exps test_exps) in
+  let needed = ref (StringSet.union needed (vars_of_exps test_exps)) in
   let filter = function
     | AST.Let (_, list)
     | AST.Rec (_, list, _) ->
@@ -848,14 +862,14 @@ let remove_unused ~(keepalive : string list) (is : string instr list) : string i
   let rec clean keep = function
     | [] -> []
     (* Remove commands defining x when we do not need to keep x *)
-    | ( Withfrom (x, _, _) | Variable (x, _) | Def (x, _, _, _)) :: is
+    | ( Withfrom (x, _, _) | Variable (x, _, Rel) | Def (x, _, _, _)) :: is
          when not (mem x keep)
       -> clean keep is
     | Inductive defs :: is
          when List.for_all (function (x, _, _) -> not (mem x keep)) defs
       -> clean keep is
     (* Otherwise, we keep and add free variables to the set [keep] *)
-    | (Withfrom (_, _, e) | Variable (_, e) as i) :: is -> i :: clean (free_vars e + keep) is
+    | (Withfrom (_, _, e) | Variable (_, e, _) as i) :: is -> i :: clean (free_vars e + keep) is
     | (Def (_, _, e, _) as i) :: is -> i :: clean (free_vars e + keep) is
     | (Inductive defs as i) :: is ->
        i :: clean (List.fold_left (+) keep (List.map (function (_, _, e) -> free_vars e) defs)) is
@@ -932,7 +946,7 @@ let resolve_fresh (l : name instr list) : string instr list =
   let freshen = function Normal x -> x | Fresh x -> fresh x in
   let resolve : name instr -> string instr = function
     | Def (x, ty, e, t) -> Def (freshen x, ty, e, t)
-    | Variable (x, e) -> Variable (freshen x, e)
+    | Variable (x, e, k) -> Variable (freshen x, e, k)
     | Inductive defs ->
        Inductive (List.map (fun (x, n, e) -> (x, freshen n, e)) defs)
     | Withfrom (s, s', e) -> Withfrom (s, freshen s', e)
@@ -950,10 +964,10 @@ let remove_withfrom_axiom_set (l : string instr list) : string instr list =
     | App (e1, Tup e2s) -> App (e1, Tup (e2s @ [e2]))
     | e1 -> App (e1, e2)
   in
-  let eta_expanse x e = Fun ([x], add_arg e (Var x)) in
+  let eta_expanse x e = Fun ([(x, None)], add_arg e (Var x)) in
   let f : string instr -> string instr list = function
     | Withfrom (x, set, e) ->
-       [Variable (set, App (Cst "sig", eta_expanse x e));
+       [Variable (set, App (Cst "sig", eta_expanse x e), Rel);
         Def (x, None, App (Cst "proj1_sig", Var set), Normal_definition)]
     | i -> [i]
   in
@@ -968,7 +982,7 @@ let remove_withfrom (l : string instr list) : string instr list =
   in
   let collect : string instr -> string instr list = function
     | Withfrom (x, set, e) ->
-       [Variable (x, App (Cst "relation", Cst "events"));
+       [Variable (x, App (Cst "relation", Cst "events"), Rel);
         Def (set, None, add_arg e (Var x), Condition)]
     | i -> [i]
   in
@@ -1000,7 +1014,7 @@ let resolve_shadowing add_info defined (instrs : string instr list) : string ins
   let sub e = subst_with_var !renaming e in
   let rename = function
     | Def (x, ty, e, t) -> let e = sub e in Def (def x, ty, e, t)
-    | Variable (x, e) -> let e = sub e in Variable (def x, e)
+    | Variable (x, e, k) -> let e = sub e in Variable (def x, e, k)
     | Inductive defs ->
        defs
        |> List.map (fun (x, y, e) -> (def x, def y, e))
@@ -1054,7 +1068,7 @@ let remove_trywith options defined : string instr list -> string instr list =
     | Var x           -> Var x
     | Cst s           -> Cst s
     | App (e1, e2)    -> App (f e1, f e2)
-    | Fun (xs, e)     -> Fun (xs, fnewdef xs e)
+    | Fun (xs, e)     -> Fun (xs, fnewdef (List.map fst xs) e)
     | Let (x, e1, e2) -> Let (x, f e1, fnewdef [x] e2)
     | Fix (x, xs, e)  -> Fix (x, xs, fnewdef (x :: xs) e)
     | Tup es          -> Tup (List.map f es)
@@ -1073,7 +1087,7 @@ let remove_trywith options defined : string instr list -> string instr list =
   let def x = define x; x in
   List.map (function
       | Def (x, ty, e, t) -> let e = rmtry e in Def (def x, ty, e, t)
-      | Variable (x, e) -> let e = rmtry e in Variable (def x, e)
+      | Variable (x, e, k) -> let e = rmtry e in Variable (def x, e, k)
       | Inductive defs ->
          List.iter (fun (x, y, _) -> define x; define y) defs;
          Inductive (List.map (fun (x, y, e) -> (x, y, rmtry e)) defs)
@@ -1137,7 +1151,7 @@ let resolve_charset : string instr list -> string instr list =
   | Var x           -> Var (fx x)
   | Cst s           -> Cst s
   | App (e1, e2)    -> App (fe e1, fe e2)
-  | Fun (xs, e)     -> Fun (List.map fx xs, fe e)
+  | Fun (xs, e)     -> Fun (List.map (fun (x, ty) -> (fx x, ty)) xs, fe e)
   | Let (x, e1, e2) -> Let (fx x, fe e1, fe e2)
   | Fix (x, xs, e)  -> Fix (fx x, List.map fx xs, fe e)
   | Tup es          -> Tup (List.map fe es)
@@ -1150,7 +1164,7 @@ let resolve_charset : string instr list -> string instr list =
   List.map
     (function
      | Def (x, ty, e, t) -> Def (fx x, ty, fe e, t)
-     | Variable (x, e) -> Variable (fx x, fe e)
+     | Variable (x, e, k) -> Variable (fx x, fe e, k)
      | Inductive l ->
         Inductive (List.map (fun (x, y, e) -> (fx x, fx y, fe e)) l)
      | Withfrom (x, y, e) -> Withfrom (fx x, fx y, fe e)
@@ -1181,7 +1195,7 @@ let naming_information (instructions : string instr list) : naming =
   begin List.iter
     (function
      | Def (x, _, e, _) -> use e; def x
-     | Variable (x, e) -> use e; def x
+     | Variable (x, e, _) -> use e; def x
      | Withfrom (x, y, e) -> use e; def x; def y
      | Comment _ | Command _ -> ()
      | Inductive l ->
@@ -1258,11 +1272,117 @@ prelude nor provided by the candidate:
    *                           ^ String.concat "\n" !infos ^ "\n")] *)
   |> resolve_charset
 
+(** Evaluation step, to help generate schemes *)
+
+let step options instrs =
+  let pp e = pprint_exp options (elim_non_ra_ops e) in
+  let sub =
+    StringMap.from_bindings
+      (filter_map
+         (function Def (x, _, e, _) -> Some (x, e) | _ -> None)
+         instrs)
+  in
+  let rec f = function
+  | Var x           -> StringMap.safe_find (Var x) x sub
+  | Cst _ | Fun _ | Fix _ | Tup _ | Op0 _ | Op1 _ | Op2 _ as e | Annot (_, e) -> e
+  | Try (_, _)      -> invalid_arg "step: try"
+  | App (Var x, e2) as e ->
+     begin match StringMap.find_opt x sub with
+     | Some e1 -> f (App (e1, e2))
+     | None -> e
+     end
+  | Let (x, e2, e1) | App (Fun ([x, _], e1), e2) ->
+     subst (StringMap.singleton x e2) e1
+  | App (Fun _, _) -> invalid_arg "step: todo: handle arity"
+  | App (e1, e2) ->
+     invalid_arg (sprintf "step: App(%s, %s)"
+                    (pp e1)
+                    (pp e2))
+  in f
+
+
+(** Add induction schemes *)
+
+let add_elimination_schemes options instrs =
+  let step = step options instrs in
+  let rec prove cst r x y =
+    let pr r x y e = List.map (( ^ ) " ") (prove cst r x y e) in
+    function
+    | e when StringSet.for_all cst (free_vars e) -> ["exact " ^ r]
+    | Var i when not (cst i) ->
+       [sprintf "apply %s_ind'; exact %s" i r]
+    | Op2 (Union, e1, e2) ->
+       sprintf "destruct %s as [%s | %s]; [ left | right ]" r r r
+       :: pr r x y e1 @ pr r x y e2
+    | Op2 (Inter, e1, e2) ->
+       let r1, r2 = r ^ "1", r ^ "2" in
+       sprintf "destruct %s as [%s %s]; split" r r1 r2
+       :: pr r1 x y e1 @ pr r2 x y e2
+    | Op2 (Sub, e1, e2) -> pr r x y (Op2 (Inter, e1, Op1 (AST.Comp, e2)))
+    | Op2 (Seq, e1, e2) when options.defs = Ra->
+       let z = x ^ "_" ^ y in
+       let r1, r2 = r ^ "1", r ^ "2" in
+       sprintf "destruct %s as [%s %s %s]; exists %s" r z r1 r2 z
+       :: pr r1 x z e1 @ pr r2 z y e2
+    | Op2 (Seq, e1, e2) ->
+       let z = x ^ "_" ^ y in
+       let r1, r2 = r ^ "1", r ^ "2" in
+       sprintf "destruct %s as [%s [%s %s]]; exists %s; split" r z r1 r2 z
+       :: pr r1 x z e1 @ pr r2 z y e2
+    | Op1 (AST.Inv, e) -> pr r y x e
+    | e ->
+       let e' = step e in
+       if e' <> e then
+         prove cst r x y e'
+       else
+         (eprintf "Err: could not generate scheme for \"%s\"\n" (pprint_exp options e);
+         invalid_arg (sprintf "could not generate scheme"))
+
+  in
+  let pass = function
+  | Inductive defs ->
+     let xs = List.map (fun (x, _, _) -> x) defs in
+     let cst v = not (List.mem v xs) in
+     let xs' = List.map (fun x -> x ^ "'") xs in
+     let sub = StringMap.from_bindings (List.map (fun x -> (x, Var (x ^ "'"))) xs)in
+     let x, y = "x", "y" in
+     let scheme =
+       [Command "Section scheme.";
+        Command ("Variables " ^ (String.concat " " xs') ^ " : relation events.")]
+       @ List.map
+              (fun (x, _, e) ->
+                let hyp = sprintf "H%s'" x in
+                Variable (hyp, App (App (Cst "incl", subst sub e), Var (x ^ "'")),
+                          Scheme)) defs
+       @ [Command (
+"
+  Fixpoint " ^
+String.concat "
+      with "
+  (List.map
+     (fun rel -> sprintf "%s_ind' %s %s (r : %s %s %s) : %s' %s %s" rel x y rel x y rel x y)
+     xs)
+^ ".
+  Proof.
+    " ^ String.concat ".\n    "
+          (List.concat
+             (List.map (fun (ind, _, e) ->
+                  sprintf "destruct %s as [%s %s %s]; apply H%s'" "r" x y "r" ind
+                  :: prove cst "r" x y e) defs))
+^ ".
+  Qed.
+End scheme.")]
+     in
+     Inductive defs :: scheme
+  | i -> [i]
+  in
+  List.concat (List.map pass instrs)
+
 
 (** Print model in Coq syntax *)
 
 let pprint_coq_model
-      (options : printing_options)
+      (options : options)
       (parse_file : string -> AST.t)
       (model : AST.t) : string =
   let parse fname = let (_, _, i) = parse_file fname in i in
@@ -1278,13 +1398,14 @@ let pprint_coq_model
   instrs
 
   (* We include stdlib.cat *)
-  |> (fun is -> AST.Include (TxtLoc.none, "stdlib.cat") :: is)
+  |> app_if (name <> "stdlib") (fun is -> AST.Include (TxtLoc.none, "stdlib.cat") :: is)
 
   (* Including includes *)
   |> expand_include parse
 
   (* Remove unused definitions (at herd's syntax level) *)
-  |> filter_unused_defs
+  |> app_if (not options.keep_unused)
+       (filter_unused_defs options.keep)
 
   (* Simple line-by-line translation *)
   |> List.map translate_instr |> List.concat
@@ -1300,21 +1421,27 @@ let pprint_coq_model
   (* Inline some definitions *)
   |> some_inlining
 
+  (* |> (fun is -> try add_elimination_schemes options is with Invalid_argument _ -> is) *)
+  |> add_elimination_schemes options
+
   (* Handle notations *)
   |> app_if (options.defs = Ra) (instrs_map (elim_non_ra_ops))
   |> app_if (not options.notations) (instrs_map (elim_ops))
-  |> app_if (true || options.notations) (fun is -> Command "Open Scope cat_scope." :: is)
+  |> app_if options.notations (fun is -> Command "Open Scope cat_scope." :: is)
 
   (* Annotation for special cases in RA *)
   |> app_if (options.defs = Ra)
        (List.map (function
+          | Def (("imply" | "nodetour" | "singlestep") as x,
+                 None, Fun (xs, e), t) ->
+             let xs_typed = List.map (fun (x, _) -> (x, Some "relation events")) xs in
+             Def (x, None, Fun (xs_typed, e), t)
           | Def (x, None, e, t) as i ->
              begin match e with
              | Op0 Empty
                | Annot (_, Op0 Empty) ->
                    Def (x, Some (type_of_name_str options x), e, t)
-             | App (Var "domain", Op0 Empty) ->
-                   Def (x, Some "set events", e, t)
+             | App (Var "domain", Op0 Empty) -> Def (x, Some "set events", e, t)
              | _ -> i
              end
           | i -> i))
@@ -1323,16 +1450,20 @@ let pprint_coq_model
   |> (fun is -> [ [Command "Section Model."]; is; [Command "End Model."]; ] |> List.concat)
 
   |> (fun is -> Command "Require Import Cat." :: is)
-  |> app_if (options.defs = Ra) (fun is -> Command "From RelationAlgebra Require Import lattice prop monoid rel." :: is)
+  |> app_if (options.defs = Ra) (fun is ->
+         Command "From RelationAlgebra Require Import lattice prop monoid rel." :: is)
   |> (fun is -> Command "From Coq Require Import Relations String." :: is)
 
   (* Remove unused definitions *)
-  |> remove_unused ~keepalive:["events"; "witness_conditions"; "model_conditions"]
+  |> app_if (not options.keep_unused)
+       (remove_unused ~keepalive:(["events"; "witness_conditions"; "model_conditions"] @ options.keep))
 
   (* Adding unfold hints *)
   |> (fun instrs ->
     let defined = filter_map (function Def (x, _, _, _) -> Some x | _ -> None) instrs in
-    let defined = if options.defs = Ra then defined else "SetLike_set_events" :: "SetLike_relation_events" :: defined in
+    let defined = if options.defs = Ra
+                  then defined
+                  else "SetLike_set_events" :: "SetLike_relation_events" :: defined in
     instrs @ verb 0 [Command (sprintf "\nHint Unfold %s : cat." (String.concat " " defined))])
 
   (* Add the definition of valid *)
@@ -1360,6 +1491,8 @@ let debug = ref false
 let defs = ref Stdlib
 let force_defined = ref []
 let includes = ref []
+let keep = ref []
+let keep_unused = ref false
 let makefile = ref false
 let notations = ref true
 let output_file = ref None
@@ -1440,6 +1573,19 @@ let options =
      sprintf
        "<dir>
         add <dir> to search path\n")
+  ;
+    ("-keep",
+     Arg.String (fun s -> keep := split_on_char ',' s),
+     sprintf
+       "<ident1>[,<ident2>[,...]]
+        do not remove definitions of these identifiers, even if they
+        are never used.\n")
+  ;
+    ("-keep_unused",
+     Arg.Unit (fun () -> keep_unused := true),
+     sprintf
+       "
+        keep unused definitions.\n")
   ;
     ("-makefile",
      Arg.Unit (fun () -> makefile := true),
@@ -1550,16 +1696,18 @@ let normalize_filename fname =
 let vfilename fname = normalize_filename fname ^ ".v"
 
 let handle_filename fname outchannel =
-  let printing_options =
+  let options =
     { aggressive_assoc = false;
-      verbosity = !verbosity;
-      notations = !notations;
       defs = !defs;
-      force_defined = !force_defined }
+      force_defined = !force_defined;
+      keep = !keep;
+      keep_unused = !keep_unused;
+      notations = !notations;
+      verbosity = !verbosity }
   in
   let text =
     pprint_coq_model
-      printing_options
+      options
       Parser.parse
       (Parser.parse fname)
   in
@@ -1683,7 +1831,7 @@ clean:
 
   with
   | Misc.Fatal errmsg
-    | Failure errmsg ->
+    | Failure errmsg | Invalid_argument errmsg ->
      eprintf "Error%s: %s\n"
        (match !current_filename with
         | None -> ""
