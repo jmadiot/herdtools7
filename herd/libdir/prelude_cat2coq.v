@@ -105,19 +105,19 @@ Record candidate :=
     B   : set events; (* branch events *)
     RMW : set events; (* read-modify-write events *)
     F   : set events; (* fence events *)
-    
+
     po  : relation events; (* program order *)
     addr: relation events; (* address dependency *)
     data: relation events; (* data dependency *)
     ctrl: relation events; (* control dependency *)
     rmw : relation events; (* read-exclusive write-exclusive pair *)
     amo : relation events; (* atomic modify *)
-    
+
     rf  : relation events; (* read-from *)
     loc : relation events; (* same location *)
     ext : relation events; (* external *)
     int : relation events; (* internal *)
-    
+
     (* Two functions for unknown sets or relations that are found in
     .cat files. cat2coq uses [unknown_set "ACQ"] when translating
     some parts of cat files about C11 *)

@@ -64,7 +64,7 @@ let pprint_op1 : definitions -> AST.op1 -> string -> string =
      begin function
        | Inv -> sprintf "%s°"
        | Comp -> sprintf "!%s"
-       | ToId -> invalid_arg "ra: ToId was not converted away"
+       | ToId -> sprintf "[%s]"
        | Plus -> sprintf "%s^+"
        | Star -> sprintf "%s^*"
        | Opt -> invalid_arg "ra: Opt was not converted away"
@@ -291,7 +291,8 @@ let level_op1 =
      begin function
        | Inv -> 5
        | Comp -> 20
-       | ToId | Opt -> invalid_arg "level_op1: not an RA operator"
+       | ToId -> 1
+       | Opt -> invalid_arg "level_op1: not an RA operator"
        | Plus -> 5
        | Star -> 5
      end
@@ -488,8 +489,10 @@ let rec elim_ops =
 
 let rec elim_non_ra_ops =
   let f = elim_non_ra_ops in
-  let app1 x e1 = App (Cst x, e1) in
-  let app2 x e1 e2 = App (App (Cst x, e1), e2) in
+  (* let app1 x e1 = App (Cst x, e1) in *)
+  (* let app2 x e1 e2 = App (App (Cst x, e1), e2) in *)
+  let toid e = Op1 (AST.ToId, e) in
+  let comp e1 e2 = Op2 (Seq, e1, e2) in
   function
   | Var x -> Var x
   | Cst x -> Cst x
@@ -499,15 +502,16 @@ let rec elim_non_ra_ops =
   | Fix (x, xs, e) -> Fix (x, xs, f e)
   | Tup es -> Tup (List.map f es)
   | Op0 o -> Op0 o
-  | Op1 (AST.ToId, e1) -> app1 (name_op1 AST.ToId) (f e1)
+  (* | Op1 (AST.ToId, e1) -> app1 (name_op1 AST.ToId) (f e1) *)
   | Op1 (AST.Opt, e1) -> Op2 (Union, f e1, Op0 Id)
   | Op1 (op1, e1) -> Op1 (op1, f e1)
   | Op2 (Sub, e1, e2) -> Op2 (Inter, f e1, Op1 (AST.Comp, f e2))
-  | Op2 (Cartes, e1, e2) ->
-     begin match name_op2 Cartes with
-     | Some x -> app2 x (f e1) (f e2)
-     | None -> failwith "Cartes"
-     end
+  | Op2 (Cartes, e1, e2) -> comp (comp (toid (f e1)) (Op0 Universal)) (toid (f e2))
+  (* | Op2 (Cartes, e1, e2) ->
+   *    begin match name_op2 Cartes with
+   *    | Some x -> app2 x (f e1) (f e2)
+   *    | None -> failwith "Cartes"
+   *    end *)
   | Op2 (op2, e1, e2) -> Op2 (op2, f e1, f e2)
   | Try (e1, e2) -> Try (f e1, f e2)
   | Annot (s, e) -> Annot (s, f e)
@@ -578,12 +582,11 @@ let middle_definitions =
   [
     Def ("M", None, Op2 (Union, Var "R", Var "W"), Normal_definition);
     Def ("emptyset", Some "set events", Cst "empty", Normal_definition);
-    Def ("classes_loc", Some "set events -> set (set events)",
-         Cst "fun S Si => incl Si S /\\ forall x y, Si x -> Si y -> loc x y",
+    Def ("classes_loc", Some "Ensemble events -> Ensemble (Ensemble events)",
+         Cst "fun S Si => (forall x, Si x -> S x) /\\ forall x y, Si x -> Si y -> loc x y",
          Normal_definition)
         (* TODO FIX classes_loc which is obv. wrong *)
   ]
-
 
 (** After generated code *)
 
@@ -603,16 +606,16 @@ let end_text instrs =
       instrs
   in
 
-  let relations = String.concat " " all_axiom_relations in
+  let relations = String.concat "" (List.map ((^) " ") all_axiom_relations) in
   sprintf
 "
-Definition valid (c : candidate) := %s%s.
+Definition valid (c : candidate) :=%s%s.
 "
-  (if empty_witness_cond then "" else sprintf "
-  exists %s : relation (events c),
-    witness_conditions c %s /\\
+  (if empty_witness_cond then " " else sprintf "
+  exists%s : relation (events c),
+    witness_conditions c%s /\\
     " relations relations)
-  (if empty_model_cond then "True" else sprintf "model_conditions c %s" relations)
+  (if empty_model_cond then "True" else sprintf "model_conditions c%s" relations)
 
 
 
@@ -1451,8 +1454,8 @@ let pprint_coq_model
 
   |> (fun is -> Command "Require Import Cat." :: is)
   |> app_if (options.defs = Ra) (fun is ->
-         Command "From RelationAlgebra Require Import lattice prop monoid rel." :: is)
-  |> (fun is -> Command "From Coq Require Import Relations String." :: is)
+         Command "From RelationAlgebra Require Import lattice prop monoid rel kat." :: is)
+  |> (fun is -> Command "From Coq Require Import Relations Ensembles String." :: is)
 
   (* Remove unused definitions *)
   |> app_if (not options.keep_unused)
@@ -1476,6 +1479,12 @@ let pprint_coq_model
         verb 1 [Comment ("End of translation of model " ^ name)])
 
   (* Convert to a string *)
+  |> (fun l ->
+    Comment "This file is an automatic translation, the licence of the source can be found here:" ::
+      (if name = "ARMv8 AArch64" then
+         Comment "https://github.com/herd/herdtools7/blob/master/herd/libdir/aarch64.cat"
+       else
+         Comment "https://github.com/herd/herdtools7/blob/master/LICENSE.txt") :: l)
   |> List.map (pprint_instr options)
   |> List.concat
   |> String.concat "\n"
@@ -1823,7 +1832,7 @@ $(cat_vos): Cat.vo
 %%.vo: %%.v
 	coqc $<
 clean:
-	rm -f $(all_vos) $(all_vos:vo=glob)
+	rm -f $(all_vos) $(all_vos:vo=glob) $(all_vos:vo=vok) $(all_vos:vo=vos) $(addprefix .,$(all_vos:vo=aux))
 "
           (v files) !prefix !prefix;
       end;
