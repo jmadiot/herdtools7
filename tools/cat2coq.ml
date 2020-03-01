@@ -578,14 +578,19 @@ let start_definitions defs=
 
 (** After generated imports from candidate *)
 
-let middle_definitions =
+let middle_definitions options =
   [
     Def ("M", None, Op2 (Union, Var "R", Var "W"), Normal_definition);
     Def ("emptyset", Some "set events", Cst "empty", Normal_definition);
-    Def ("classes_loc", Some "Ensemble events -> Ensemble (Ensemble events)",
-         Cst "fun S Si => (forall x, Si x -> S x) /\\ forall x y, Si x -> Si y -> loc x y",
-         Normal_definition)
-        (* TODO FIX classes_loc which is obv. wrong *)
+    if options.defs = Ra then
+      Def ("classes_loc", Some "set events -> Ensemble (Ensemble events)",
+           Cst "fun S Si => (forall x, Si x -> Ensemble_of_dpset S x) /\\ forall x y, Si x -> Si y -> loc x y",
+           Normal_definition)
+    else
+      Def ("classes_loc", Some "Ensemble events -> Ensemble (Ensemble events)",
+           Cst "fun S Si => (forall x, Si x -> S x) /\\ forall x y, Si x -> Si y -> loc x y",
+           Normal_definition)
+          (* TODO FIX classes_loc which is obv. wrong *)
   ]
 
 (** After generated code *)
@@ -1419,7 +1424,7 @@ let pprint_coq_model
   |> transform_instrs options
 
   (* Adding definitions *)
-  |> (fun is -> start_definitions options.defs @ intro_R_W_etc @ middle_definitions @ is)
+  |> (fun is -> start_definitions options.defs @ intro_R_W_etc @ middle_definitions options @ is)
 
   (* Inline some definitions *)
   |> some_inlining
@@ -1430,7 +1435,10 @@ let pprint_coq_model
   (* Handle notations *)
   |> app_if (options.defs = Ra) (instrs_map (elim_non_ra_ops))
   |> app_if (not options.notations) (instrs_map (elim_ops))
-  |> app_if options.notations (fun is -> Command "Open Scope cat_scope." :: is)
+  |> app_if (options.notations && options.defs = Stdlib) (fun is -> Command "Open Scope cat_scope." :: is)
+
+  (* (\* special_case for [linearisations] in ra ... *\)
+   * |> app_if (options.defs = Ra) (instrs_map (exp_map (fun App (Var "linearisations")))) *)
 
   (* Annotation for special cases in RA *)
   |> app_if (options.defs = Ra)
@@ -1439,6 +1447,9 @@ let pprint_coq_model
                  None, Fun (xs, e), t) ->
              let xs_typed = List.map (fun (x, _) -> (x, Some "relation events")) xs in
              Def (x, None, Fun (xs_typed, e), t)
+          | Def (("toid" | "fencerel" | "ctrlcfence") as x, o, Fun (xs, e), t) ->
+             let xs_typed = List.map (fun (x, _) -> (x, Some "set events")) xs in
+             Def (x, o, Fun (xs_typed, e), t)
           | Def (x, None, e, t) as i ->
              begin match e with
              | Op0 Empty
@@ -1452,10 +1463,19 @@ let pprint_coq_model
   (* Adding section *)
   |> (fun is -> [ [Command "Section Model."]; is; [Command "End Model."]; ] |> List.concat)
 
-  |> (fun is -> Command "Require Import Cat." :: is)
-  |> app_if (options.defs = Ra) (fun is ->
-         Command "From RelationAlgebra Require Import lattice prop monoid rel kat." :: is)
-  |> (fun is -> Command "From Coq Require Import Relations Ensembles String." :: is)
+  |> app_if
+       (options.defs = Stdlib)
+       (fun is ->
+         Command "From Catincoq Require Import Cat." ::
+           Command "From Coq Require Import Relations Ensembles String." ::
+             is)
+  |> app_if
+       (options.defs = Ra)
+       (fun is ->
+         Command "From Coq Require Import Relations Ensembles String." ::
+           Command "From RelationAlgebra Require Import lattice prop monoid rel kat." ::
+               Command "From Catincoq Require Import Cat proprel." ::
+             is)
 
   (* Remove unused definitions *)
   |> app_if (not options.keep_unused)
@@ -1812,8 +1832,9 @@ let () =
         let v l = String.concat " " (List.map (fun x -> pre (x ^ ".v")) l) in
 
         let o = careful_open_out (pre "importeverything.v") in
-        fprintf o "Require Import Cat Relations.\n";
-        fprintf o "Require %s.\n\n" (String.concat " " (List.map pre files));
+        fprintf o "From Coq Require Relations.\n";
+        fprintf o "%sRequire Import Cat.\n" (if !defs = Ra then "From Catincoq " else "");
+        fprintf o "%sRequire %s.\n\n" "From Catincoq_models " (String.concat " " (List.map pre files));
         List.(iter (fprintf o "Check %s.valid.\n") (map pre files));
         close_out o;
 
@@ -1823,11 +1844,11 @@ cat_vs=%s
 
 cat_vos=$(cat_vs:=o)
 
-all_vos=$(cat_vos) Cat.vo %simporteverything.vo
+all_vos=$(cat_vos) %simporteverything.vo #Cat.vo
 
 all: $(all_vos)
 %simporteverything.vo: $(cat_vos)
-$(cat_vos): Cat.vo
+#$(cat_vos): Cat.vo
 
 %%.vo: %%.v
 	coqc $<
