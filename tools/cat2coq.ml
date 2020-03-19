@@ -539,7 +539,7 @@ let free_vars_of_instrs (fv: 'a -> string list) (l : 'a instr list) =
 
 let candidate_fields =
   ["R"; "W"; "IW"; "FW"; "B"; "RMW"; "F";
-   "rf"; "po"; "int"; "ext"; "loc"; "addr"; "data"; "ctrl"; "amo"]
+   "rf"; "po"; "int"; "ext"; "loc"; "addr"; "data"; "ctrl"; "amo"; "rmw"]
 
 let imports_candidate_fields : string instr list =
   List.map
@@ -847,7 +847,7 @@ let filter_unused_defs needed instrs =
   let needed = ref (StringSet.union needed (vars_of_exps test_exps)) in
   let filter = function
     | AST.Let (_, list)
-    | AST.Rec (_, list, _) ->
+    | AST.Rec (_, list, None) ->
       let pats = List.concat @@ List.map (fun (_, x, _) -> vars_of_pat x) list in
        if List.exists (fun s -> StringSet.mem s !needed) pats then begin
           let exps = List.map (fun (_, _, e) -> e) list in
@@ -855,6 +855,13 @@ let filter_unused_defs needed instrs =
           true
          end
        else false
+    | AST.Rec (_, list, Some (_, _, _, exp, _)) ->
+       let exps = List.map (fun (_, _, e) -> e) list in
+       needed := StringSet.union !needed (vars_of_exps (exp :: exps));
+       true
+    | AST.Test ((_, _, _, exp, _), _) ->
+       needed := StringSet.union !needed (vars_of_exps [exp]);
+       true
     | AST.WithFrom (_, _, exp) ->
        needed := StringSet.union !needed (vars_of_exps [exp]);
        true
@@ -1466,7 +1473,7 @@ let pprint_coq_model
   |> app_if
        (options.defs = Stdlib)
        (fun is ->
-         Command "From Catincoq Require Import Cat." ::
+         Command "From Catincoq.lib Require Import Cat." ::
            Command "From Coq Require Import Relations Ensembles String." ::
              is)
   |> app_if
@@ -1474,7 +1481,7 @@ let pprint_coq_model
        (fun is ->
          Command "From Coq Require Import Relations Ensembles String." ::
            Command "From RelationAlgebra Require Import lattice prop monoid rel kat." ::
-               Command "From Catincoq Require Import Cat proprel." ::
+               Command "From Catincoq.lib Require Import Cat proprel." ::
              is)
 
   (* Remove unused definitions *)
@@ -1833,8 +1840,8 @@ let () =
 
         let o = careful_open_out (pre "importeverything.v") in
         fprintf o "From Coq Require Relations.\n";
-        fprintf o "%sRequire Import Cat.\n" (if !defs = Ra then "From Catincoq " else "");
-        fprintf o "%sRequire %s.\n\n" "From Catincoq_models " (String.concat " " (List.map pre files));
+        fprintf o "%sRequire Import Cat.\n" (if !defs = Ra then "From Catincoq.lib " else "");
+        fprintf o "%sRequire %s.\n\n" "From Catincoq.models " (String.concat " " (List.map pre files));
         List.(iter (fprintf o "Check %s.valid.\n") (map pre files));
         close_out o;
 
